@@ -1,0 +1,129 @@
+{
+  "name": "octomilka",
+  "displayName": "Octomilka – lokální AI doplňování kódu",
+  "description": "Doplňování kódu ve stylu Copilota, které běží celé na tvém PC. Zdarma, offline, bez účtu.",
+  "version": "0.1.0",
+  "publisher": "lukas-vitek",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LukasVitek67/octomilka.git"
+  },
+  "homepage": "https://github.com/LukasVitek67/octomilka#readme",
+  "bugs": {
+    "url": "https://github.com/LukasVitek67/octomilka/issues"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Machine Learning",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "autocomplete",
+    "offline",
+    "local",
+    "llama.cpp",
+    "qwen"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "octomilka.generate",
+        "title": "Octomilka: Dopsat funkci / kód u kurzoru"
+      },
+      {
+        "command": "octomilka.toggle",
+        "title": "Octomilka: Zapnout / vypnout"
+      },
+      {
+        "command": "octomilka.setup",
+        "title": "Octomilka: Nainstalovat / stáhnout AI znovu"
+      },
+      {
+        "command": "octomilka.menu",
+        "title": "Octomilka: Menu"
+      },
+      {
+        "command": "octomilka.log",
+        "title": "Octomilka: Zobrazit log"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "octomilka.generate",
+        "key": "ctrl+alt+enter",
+        "mac": "cmd+alt+enter",
+        "when": "editorTextFocus && !editorReadonly"
+      }
+    ],
+    "configuration": {
+      "title": "Octomilka",
+      "properties": {
+        "octomilka.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Zapnout šedé návrhy (Tab) při psaní."
+        },
+        "octomilka.profile": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "small",
+            "medium",
+            "large"
+          ],
+          "enumDescriptions": [
+            "Vybrat podle RAM tohoto PC",
+            "8 GB RAM: Tab 0.5B + funkce 3B (~2,5 GB)",
+            "16 GB RAM: Tab 1.5B + funkce 7B (~6,3 GB)",
+            "32 GB+ RAM: Tab 1.5B + funkce Qwen3-Coder 30B-A3B (~20 GB)"
+          ],
+          "default": "auto",
+          "description": "Velikost modelů."
+        },
+        "octomilka.gpu": {
+          "type": "boolean",
+          "default": true,
+          "description": "Použít grafiku (Vulkan / Metal), pokud je k dispozici."
+        },
+        "octomilka.autoFunction": {
+          "type": "boolean",
+          "default": true,
+          "description": "Když napíšeš hlavičku funkce s prázdným tělem, velký model navrhne celé tělo jako šedý text."
+        },
+        "octomilka.debounceMs": {
+          "type": "number",
+          "default": 200,
+          "description": "Pauza v psaní (ms), po které se vyžádá návrh."
+        },
+        "octomilka.idleMinutes": {
+          "type": "number",
+          "default": 15,
+          "description": "Po kolika minutách nečinnosti uvolnit velký model z RAM."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "esbuild src/extension.ts --bundle --platform=node --target=node18 --format=cjs --external:vscode --outfile=dist/extension.js --minify",
+    "watch": "esbuild src/extension.ts --bundle --platform=node --target=node18 --format=cjs --external:vscode --outfile=dist/extension.js --sourcemap --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.test.json && node out-test/test/stub.test.js",
+    "package": "npm run build && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "~1.90.0",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  }
+}
