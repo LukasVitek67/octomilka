@@ -11,9 +11,9 @@ const log = (m: string) => {
   if (/připraven|nevyšlo/.test(m)) console.log('  ' + m.slice(0, 140));
 };
 
-async function gen(s: LlamaServer, o: PromptOpts, signature: string | null, skip: string[], temperature: number) {
+async function gen(s: LlamaServer, o: PromptOpts, signature: string | null, skip: string[], temperature: number, linePrefix = '') {
   const lines: string[] = [];
-  const st = new BodyStreamer(o.langId, signature, (l) => lines.push(l), skip);
+  const st = new BodyStreamer(o.langId, signature, (l) => lines.push(l), skip, linePrefix);
   const ac = new AbortController();
   const t0 = Date.now();
   let sum = 0;
@@ -127,6 +127,19 @@ async function main() {
     console.log(`\n[${r3.title}] ${r3.ms} ms\n${indentLines(r3.lines, ins3.indent)}`);
     check('nezopakuje hlavičku funkce', !r3.lines.some((l) => l.trim().startsWith('def nacti')));
     check('české zadání → Python', /open\(|readlines|strip\(\)/.test(r3.lines.join('\n')) && !/function |=>/.test(r3.lines.join('\n')));
+
+    // 6) "Doplň teď!" záloha: velká AI dopíše rozepsaný řádek (volný režim)
+    const F6 = 'const items = [{ price: 10, qty: 2 }, { price: 5, qty: 3 }];\nconst total = ';
+    const r6 = await gen(big, { fileName: 'C:/x/cart.js', langId: 'javascript', before: F6, after: '\n\nconsole.log(total);\n', mode: 'free' }, null, [], 0.1, 'const total = ');
+    const line6 = F6.split('\n')[1] + r6.lines.join('\n');
+    console.log(`\n[doplň teď] ${r6.ms} ms\n${line6}`);
+    let total6: unknown;
+    try {
+      total6 = new Function(F6.split('\n')[0] + '\n' + line6 + '\nreturn total;')();
+    } catch (e) {
+      console.log('  chyba: ' + (e as Error).message);
+    }
+    check('doplň teď: dopsaný řádek funguje (35)', total6 === 35);
   } finally {
     tab.stop();
     big.stop();

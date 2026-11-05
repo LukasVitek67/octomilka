@@ -150,6 +150,9 @@ export class OctoView implements vscode.WebviewViewProvider {
       case 'generate':
         await cmd('workbench.action.focusActiveEditorGroup');
         return void cmd('octomilka.generate');
+      case 'suggestNow':
+        await cmd('workbench.action.focusActiveEditorGroup');
+        return void cmd('octomilka.suggestNow');
       case 'stop':
         return this.host.stop();
     }

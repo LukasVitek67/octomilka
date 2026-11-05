@@ -2,8 +2,8 @@
 export function viewHtml(csp: string, mac: boolean): string {
   const nonce = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
   const k = mac
-    ? { word: '⌘→', next: '⌥] / ⌥[', gen: '⌘⌥Enter', alt: '⌥⇧Enter' }
-    : { word: 'Ctrl+→', next: 'Alt+] / Alt+[', gen: 'Ctrl+Alt+Enter', alt: 'Alt+Shift+Enter' };
+    ? { now: '⌥Enter', word: '⌘→', next: '⌥] / ⌥[', gen: '⌘⌥Enter', alt: '⌥⇧Enter' }
+    : { now: 'Alt+Enter', word: 'Ctrl+→', next: 'Alt+] / Alt+[', gen: 'Ctrl+Alt+Enter', alt: 'Alt+Shift+Enter' };
   return /* html */ `<!doctype html>
 <html lang="cs">
 <head>
@@ -193,6 +193,7 @@ export function viewHtml(csp: string, mac: boolean): string {
   <section id="help">
     <h2>Zkratky</h2>
     <table>
+      <tr><td><kbd>${k.now}</kbd></td><td><b>Doplň teď!</b> AI hned něco navrhne</td></tr>
       <tr><td><kbd>Tab</kbd></td><td>přijmout šedý návrh</td></tr>
       <tr><td><kbd>Esc</kbd></td><td>zahodit návrh</td></tr>
       <tr><td><kbd>${k.word}</kbd></td><td>přijmout jen další slovo</td></tr>
@@ -257,6 +258,7 @@ export function viewHtml(csp: string, mac: boolean): string {
       cls = 'ok pulse'; text = 'Navrhuje doplnění… <small>(stačí psát dál)</small>';
     } else {
       cls = 'ok'; text = 'Připraveno. <small>Piš kód a AI bude šedě napovídat.</small>';
+      btns = '<button data-cmd="suggestNow" title="AI hned navrhne doplnění tam, kde máš kurzor (' + K.now + ')">Doplň teď! <kbd>' + K.now + '</kbd></button>';
     }
     dot.className = 'dot ' + cls;
     say.innerHTML = text;
@@ -367,6 +369,7 @@ export function viewHtml(csp: string, mac: boolean): string {
   function howTo() {
     return '<div class="empty"><h3>Jak na to</h3><ol class="steps">' +
       '<li>Napiš hlavičku funkce, třeba <code>function secti(a, b) {</code>. AI šedě navrhne zbytek. <kbd>Tab</kbd> = přijmout.</li>' +
+      '<li>AI mlčí? Zmáčkni <kbd>' + K.now + '</kbd> = „Doplň teď!“ a hned něco navrhne.</li>' +
       '<li>Nebo napiš komentář, co chceš, třeba <code>// seřaď pole od největšího</code>, a dej <kbd>Enter</kbd>.</li>' +
       '<li>Nelíbí se ti to? <kbd>' + K.alt + '</kbd> a AI vymyslí jiné řešení. Všechna uvidíš tady a můžeš mezi nimi přepínat.</li></ol></div>';
   }

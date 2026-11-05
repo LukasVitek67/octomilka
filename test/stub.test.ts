@@ -163,4 +163,12 @@ t('echoed instruction comment is skipped', () => {
   assert.deepEqual(lines, ['const d = xs.map((x) => x * 2);']);
 });
 
+t('repeated line start is cut (Doplň teď)', () => {
+  const lines: string[] = [];
+  const s = new BodyStreamer('javascript', null, (l) => lines.push(l), [], 'const total = ');
+  s.push('APPROACH: reduce\nconst total = items.reduce((a, i) => a + i.price * i.qty, 0);');
+  s.end();
+  assert.deepEqual(lines, ['items.reduce((a, i) => a + i.price * i.qty, 0);']);
+});
+
 console.log(`${n} tests passed`);

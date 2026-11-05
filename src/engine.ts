@@ -496,7 +496,8 @@ export function buildMessages(o: PromptOpts): ChatMsg[] {
   else
     task =
       `Write the code that belongs at <FILL_HERE>, following any comment directly above it. ` +
-      `Do not repeat code that is already in the file.`;
+      `Continue exactly at <FILL_HERE>: do not repeat any text that is before it on the same line, ` +
+      `and do not repeat code that is already in the file.`;
   const rules =
     `The file is ${lang} (${path.basename(o.fileName)}). Write ONLY valid ${lang} that fits this file, its imports, ` +
     `types and style - never a different programming language. ` +

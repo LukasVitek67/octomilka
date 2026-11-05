@@ -364,6 +364,8 @@ async function generateFor(
     onLine?: (l: string) => void;
     onRaw?: (t: string) => void;
     onToken?: () => void;
+    /** Už napsaný začátek řádku před kurzorem (když ho model zopakuje, odstřihne se). */
+    linePrefix?: string;
   },
 ): Promise<GenResult> {
   const msgs = buildMessages({
@@ -382,7 +384,7 @@ async function generateFor(
   const st = new BodyStreamer(doc.languageId, loc.signature, (l) => {
     lines.push(l);
     opts.onLine?.(l);
-  }, loc.skipLines);
+  }, loc.skipLines, opts.linePrefix);
   const ac = new AbortController();
   const onAbort = () => ac.abort();
   opts.signal.addEventListener('abort', onAbort);
@@ -434,6 +436,8 @@ const shortLabel = (info: { kind: string; label: string; instruction?: string })
 
 class Completer implements vscode.InlineCompletionItemProvider {
   private cache = new Map<string, vscode.InlineCompletionItem[]>();
+  /** "Doplň teď!" – do tohoto času je další návrh vynucený. */
+  private forceUntil = 0;
 
   constructor(
     private c: Controller,
@@ -441,32 +445,40 @@ class Completer implements vscode.InlineCompletionItemProvider {
     private act: Activity,
   ) {}
 
+  force(): void {
+    this.forceUntil = Date.now() + 5000;
+  }
+
   async provideInlineCompletionItems(
     doc: vscode.TextDocument,
     pos: vscode.Position,
     ictx: vscode.InlineCompletionContext,
     token: vscode.CancellationToken,
   ): Promise<vscode.InlineCompletionItem[] | undefined> {
-    if (!cfg().get('enabled', true) || !this.c.isReady()) return;
+    // Vynucený návrh: "Doplň teď!" (Alt+Enter) nebo ruční vyvolání ve VS Code.
+    const pushed = this.forceUntil > Date.now();
+    const forced = pushed || ictx.triggerKind === vscode.InlineCompletionTriggerKind.Invoke;
+    if (!this.c.isReady() || (!pushed && !cfg().get('enabled', true))) return;
     const key = `${doc.uri}#${doc.version}#${doc.offsetAt(pos)}`;
     const hit = this.cache.get(key);
-    if (hit) return hit;
+    if (hit && !pushed) return hit;
 
     const lineText = doc.lineAt(pos.line).text;
     const lineSuffix = lineText.slice(pos.character);
-    if (lineSuffix.trim().length > 8) return; // kurzor uprostřed řádku s textem
+    if (!forced && lineSuffix.trim().length > 8) return; // kurzor uprostřed řádku s textem
 
-    if (ictx.triggerKind === vscode.InlineCompletionTriggerKind.Automatic) {
+    if (!forced) {
       await sleep(cfg().get<number>('debounceMs', 200));
       if (token.isCancellationRequested) return;
     }
+    if (pushed) this.forceUntil = 0;
 
     const offset = doc.offsetAt(pos);
     const ac = new AbortController();
     const sub = token.onCancellationRequested(() => ac.abort());
     try {
       let items: vscode.InlineCompletionItem[] | undefined;
-      if (cfg().get('autoFunction', true)) {
+      if (forced || cfg().get('autoFunction', true)) {
         const text = doc.getText();
         const unit = indentUnit(doc);
         const ins = detectInstruction(text, offset, doc.languageId);
@@ -474,6 +486,9 @@ class Completer implements vscode.InlineCompletionItemProvider {
         if (ins || stub) items = await this.smart(doc, pos, offset, unit, stub, ins, ac);
       }
       if (!items) items = await this.fim(doc, pos, offset, ac.signal);
+      // Na povel a malá AI nic nevymyslela → zkusí to velká.
+      if (!items && pushed && !token.isCancellationRequested) items = await this.bigFree(doc, pos, offset, ac);
+      if (!items && pushed) vscode.window.setStatusBarMessage('Octomilka: tady mě nic nenapadlo', 3000);
       if (!items || token.isCancellationRequested) return;
       this.cache.set(key, items);
       if (this.cache.size > 50) this.cache.delete(this.cache.keys().next().value!);
@@ -499,6 +514,34 @@ class Completer implements vscode.InlineCompletionItemProvider {
       const lines = text.split('\n');
       if (lines.length > 15) text = lines.slice(0, 15).join('\n');
       if (!text.trim()) return;
+      return [new vscode.InlineCompletionItem(text, new vscode.Range(pos, pos))];
+    } finally {
+      this.act.end(job);
+    }
+  }
+
+  /** "Doplň teď!" bez funkce/komentáře: velká AI dopíše, co dává smysl u kurzoru. */
+  private async bigFree(doc: vscode.TextDocument, pos: vscode.Position, offset: number, ac: AbortController) {
+    const gen = await this.c.ensureGen();
+    const indent = indentOf(doc.lineAt(pos.line).text);
+    const { before, after } = windowAround(doc, offset, 3500, 1200);
+    const loc = {
+      info: { key: '', kind: 'fn', label: '', uri: doc.uri.toString(), lang: doc.languageId },
+      range: [offset, offset],
+      current: [],
+      before,
+      after,
+      signature: null,
+      skipLines: [],
+      mode: 'free',
+      replacement: (l: string[]) => indentLines(l, indent),
+    } as unknown as Located;
+    const job = this.act.start('cmd', 'doplnění na povel', () => ac.abort());
+    try {
+      const linePrefix = doc.lineAt(pos.line).text.slice(0, pos.character);
+      const r = await generateFor(gen, doc, loc, { temperature: 0.1, signal: ac.signal, onToken: () => this.act.tick(job), linePrefix });
+      if (ac.signal.aborted || !r.lines.some((l) => l.trim())) return;
+      const text = [r.lines[0], ...r.lines.slice(1).map((l) => (l ? indent + l : ''))].join('\n');
       return [new vscode.InlineCompletionItem(text, new vscode.Range(pos, pos))];
     } finally {
       this.act.end(job);
@@ -961,6 +1004,29 @@ export function activate(ctx: vscode.ExtensionContext): void {
   const sol = new Solutions(c, store, act, view);
   view.bind(sol);
   const upd = new Updater(ctx);
+  const completer = new Completer(c, store, act);
+
+  /** "Doplň teď!" – AI hned navrhne, i když zrovna mlčí (i uprostřed řádku, bez čekání). */
+  const suggestNow = async () => {
+    const ed = vscode.window.activeTextEditor;
+    if (!ed) {
+      vscode.window.showInformationMessage('Octomilka: nejdřív klikni do souboru s kódem.');
+      return;
+    }
+    if (!c.isReady()) {
+      if (c.state === 'starting' || c.state === 'downloading') {
+        vscode.window.showInformationMessage('Octomilka: AI se ještě připravuje, chvilku strpení.');
+        return;
+      }
+      const pick = await vscode.window.showInformationMessage('Octomilka: AI ještě neběží.', 'Spustit AI');
+      if (pick) await c.init(true);
+      if (!c.isReady()) return;
+    }
+    completer.force();
+    vscode.window.setStatusBarMessage('$(sync~spin) Octomilka: doplňuju…', 3000);
+    await vscode.commands.executeCommand('editor.action.inlineSuggest.hide');
+    await vscode.commands.executeCommand('editor.action.inlineSuggest.trigger');
+  };
 
   const pickProfile = async () => {
     const opts = [
@@ -983,7 +1049,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
     vscode.window.registerWebviewViewProvider(OctoView.id, view, { webviewOptions: { retainContextWhenHidden: true } }),
     c.changed.event(() => view.render()),
     act.onChange(() => view.render()),
-    vscode.languages.registerInlineCompletionItemProvider({ pattern: '**' }, new Completer(c, store, act)),
+    vscode.languages.registerInlineCompletionItemProvider({ pattern: '**' }, completer),
+    vscode.commands.registerCommand('octomilka.suggestNow', suggestNow),
     vscode.commands.registerCommand('octomilka.generate', () => generateCommand(c, store, act)),
     vscode.commands.registerCommand('octomilka.alternative', () => sol.fromCursor(true)),
     vscode.commands.registerCommand('octomilka.solutions', () => sol.fromCursor(false)),
@@ -1010,6 +1077,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
         items.push({ id: 'setup', label: '$(cloud-download) Nainstalovat / spustit AI' });
       items.push(
         { id: 'toggle', label: en ? '$(circle-slash) Vypnout Tab návrhy' : '$(sparkle) Zapnout Tab návrhy' },
+        { id: 'now', label: '$(zap) Doplň teď!', description: 'Alt+Enter' },
         { id: 'gen', label: '$(wand) Dopsat funkci / kód u kurzoru', description: 'Ctrl+Alt+Enter' },
         { id: 'alt', label: '$(versions) Jiné řešení', description: 'Alt+Shift+Enter' },
         { id: 'profile', label: '$(server) Velikost AI…', description: PROFILES[c.profile].label },
@@ -1024,6 +1092,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
         setup: 'octomilka.setup',
         redl: 'octomilka.setup',
         toggle: 'octomilka.toggle',
+        now: 'octomilka.suggestNow',
         gen: 'octomilka.generate',
         alt: 'octomilka.alternative',
         profile: 'octomilka.profile',

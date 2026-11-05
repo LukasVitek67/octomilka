@@ -283,6 +283,7 @@ export class BodyStreamer {
     private signature: string | null, // null = volný režim (ne tělo funkce)
     private emit: (line: string) => void,
     private skipLines: string[] = [], // řádky (trim), které model může zopakovat, např. komentář se zadáním
+    private linePrefix = '', // už napsaný začátek řádku před kurzorem – když ho model zopakuje, odstřihne se
   ) {}
 
   push(chunk: string): void {
@@ -316,6 +317,12 @@ export class BodyStreamer {
         return;
       }
       if (this.skipLines.includes(t)) return;
+      const lp = this.linePrefix.trim();
+      if (lp && t.startsWith(lp)) {
+        const rest = t.slice(lp.length).trimStart();
+        if (!rest) return;
+        l = rest;
+      }
       if (this.signature !== null && this.isEcho(l)) {
         this.echoed = true;
         return;

@@ -4,6 +4,8 @@ Doplňování kódu ve stylu Copilota pro VS Code, které **běží celé na tv�
 Zdarma, bez účtu, bez cloudu. Po prvním stažení funguje i úplně offline.
 
 - **Tab návrhy:** při psaní se objeví šedý text, Tab ho přijme.
+- **Doplň teď! (Alt+Enter):** AI hned něco navrhne, i když zrovna mlčí. Bez čekání, i uprostřed řádku.
+  Když malá AI nic nevymyslí, zkusí to velká. Je to i tlačítko v panelu a v menu pravého tlačítka.
 - **Celá funkce z názvu:** napiš hlavičku, třeba `function isPrime(n) {`, a AI navrhne celé tělo.
 - **Ctrl+Alt+Enter:** dopíše funkci (nebo kód podle komentáře nad kurzorem) rovnou do souboru a uvidíš, jak píše.
 - **Zadání komentářem:** napiš třeba `// make a function that uses .map()` (klidně česky), dej Enter a AI navrhne kód podle zadání.
@@ -29,7 +31,7 @@ Otevře se kliknutím na Octomilku ve stavové liště, nebo sám při prvním s
 
 1. Stáhni `octomilka-x.y.z.vsix` z [Releases](https://github.com/LukasVitek67/octomilka/releases/latest).
 2. Ve VS Code otevři Extensions (Ctrl+Shift+X), klikni na `…` vpravo nahoře a vyber **Install from VSIX…**.
-   Nebo v terminálu: `code --install-extension octomilka-0.4.0.vsix`
+   Nebo v terminálu: `code --install-extension octomilka-0.5.0.vsix`
 3. Vpravo dole vyskočí „Stáhnout“. Jednorázově se stáhne engine a modely podle toho, kolik máš RAM.
 4. Hotovo. Ve stavové liště vpravo dole uvidíš ✨ Octomilka.
 

@@ -2,7 +2,7 @@
   "name": "octomilka",
   "displayName": "Octomilka – lokální AI doplňování kódu",
   "description": "Doplňování kódu ve stylu Copilota, které běží celé na tvém PC. Zdarma, offline, bez účtu.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "lukas-vitek",
   "license": "MIT",
   "repository": {
@@ -72,6 +72,10 @@
         "title": "Octomilka: Otevřít panel"
       },
       {
+        "command": "octomilka.suggestNow",
+        "title": "Octomilka: Doplň teď!"
+      },
+      {
         "command": "octomilka.stop",
         "title": "Octomilka: Zastavit přemýšlení"
       },
@@ -102,6 +106,12 @@
     },
     "keybindings": [
       {
+        "command": "octomilka.suggestNow",
+        "key": "alt+enter",
+        "mac": "alt+enter",
+        "when": "editorTextFocus && !editorReadonly && !findWidgetVisible && !suggestWidgetVisible && !notebookEditorFocused"
+      },
+      {
         "command": "octomilka.generate",
         "key": "ctrl+alt+enter",
         "mac": "cmd+alt+enter",
@@ -116,6 +126,11 @@
     ],
     "menus": {
       "editor/context": [
+        {
+          "command": "octomilka.suggestNow",
+          "group": "octomilka@0",
+          "when": "editorTextFocus && !editorReadonly"
+        },
         {
           "command": "octomilka.alternative",
           "group": "octomilka@1",
