@@ -90,6 +90,8 @@ Každý server zkusí GPU, a když se model do video paměti nevejde, sám spadn
 
 Ve VS Code otevři složku a stiskni F5. Spustí se nové okno s extension.
 
+**Pro AI agenty (Claude, Codex, Copilot, Cursor…):** kompletní kontext projektu je v [AGENTS.md](AGENTS.md). Jsou tam architektura, rozhodnutí a proč, známé problémy, testy, postup vydání a pravidla.
+
 | Soubor | Co dělá |
 |---|---|
 | `src/extension.ts` | VS Code: Tab návrhy, příkaz Ctrl+Alt+Enter, stavová lišta, menu, instalace |

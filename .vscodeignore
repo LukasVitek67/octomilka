@@ -5,4 +5,7 @@ node_modules/**
 *.vsix
 .impeccable/**
 .claude/**
-.preview/**
+tools/**
+.github/**
+AGENTS.md
+CLAUDE.md

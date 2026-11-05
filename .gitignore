@@ -4,4 +4,4 @@ out/
 out-test/
 *.vsix
 .impeccable/
-.preview/
+tools/preview/out/
