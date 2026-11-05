@@ -16,9 +16,25 @@ import {
   infill,
   chatStream,
   buildMessages,
+  buildIdeasMessages,
+  parseIdeas,
+  langName,
   ExtraChunk,
 } from './engine';
-import { detectStub, stubGhost, bodyLines, BodyStreamer, trimOverlap, indentOf, Stub } from './stub';
+import {
+  detectStub,
+  detectInstruction,
+  stubGhost,
+  BodyStreamer,
+  trimOverlap,
+  indentOf,
+  indentLines,
+  lineComment,
+  Stub,
+  Instruction,
+} from './stub';
+import { SpotStore, SpotInfo, Located, resolveAt, locate } from './spots';
+import { SolutionsPanel, PanelHost } from './panel';
 
 type State = 'off' | 'needsSetup' | 'downloading' | 'starting' | 'ready' | 'error';
 
@@ -313,12 +329,79 @@ function windowAround(doc: vscode.TextDocument, offset: number, beforeChars: num
   return { text, before: text.slice(b, offset), after: text.slice(offset, a) };
 }
 
+// ---------- společné generování velkým modelem ----------
+
+interface GenResult {
+  title: string;
+  lines: string[];
+}
+
+async function generateFor(
+  gen: LlamaServer,
+  doc: vscode.TextDocument,
+  loc: Located,
+  opts: {
+    temperature: number;
+    avoid?: { title: string; code: string }[];
+    approach?: string;
+    signal: AbortSignal;
+    onLine?: (l: string) => void;
+    onRaw?: (t: string) => void;
+  },
+): Promise<GenResult> {
+  const msgs = buildMessages({
+    fileName: doc.fileName,
+    langId: doc.languageId,
+    before: loc.before,
+    after: loc.after,
+    mode: loc.mode,
+    instruction: loc.info.instruction,
+    avoid: opts.avoid,
+    approach: opts.approach,
+  });
+  const lines: string[] = [];
+  const st = new BodyStreamer(doc.languageId, loc.signature, (l) => {
+    lines.push(l);
+    opts.onLine?.(l);
+  }, loc.skipLines);
+  const ac = new AbortController();
+  const onAbort = () => ac.abort();
+  opts.signal.addEventListener('abort', onAbort);
+  let raw = '';
+  try {
+    for await (const piece of chatStream(gen, msgs, 900, ac.signal, opts.temperature)) {
+      raw += piece;
+      opts.onRaw?.(raw);
+      st.push(piece);
+      if (st.done) {
+        ac.abort();
+        break;
+      }
+    }
+  } catch (e) {
+    if (!ac.signal.aborted || opts.signal.aborted) throw e;
+  } finally {
+    opts.signal.removeEventListener('abort', onAbort);
+  }
+  st.end();
+  return { title: st.title, lines };
+}
+
+/** Šedý text pro kód pod komentářem se zadáním. */
+function instrGhost(lines: string[], ins: Instruction): { text: string; fromLineStart: boolean } {
+  if (ins.indent.startsWith(ins.curBefore)) return { text: indentLines(lines, ins.indent), fromLineStart: true };
+  return { text: [lines[0] ?? '', indentLines(lines.slice(1), ins.indent)].filter((x, i) => i === 0 || x).join('\n'), fromLineStart: false };
+}
+
 // ---------- Tab návrhy ----------
 
 class Completer implements vscode.InlineCompletionItemProvider {
   private cache = new Map<string, vscode.InlineCompletionItem[]>();
 
-  constructor(private c: Controller) {}
+  constructor(
+    private c: Controller,
+    private store: SpotStore,
+  ) {}
 
   async provideInlineCompletionItems(
     doc: vscode.TextDocument,
@@ -344,12 +427,15 @@ class Completer implements vscode.InlineCompletionItemProvider {
     const ac = new AbortController();
     const sub = token.onCancellationRequested(() => ac.abort());
     try {
-      const stub = cfg().get('autoFunction', true)
-        ? detectStub(doc.getText(), offset, doc.languageId, indentUnit(doc))
-        : undefined;
       let items: vscode.InlineCompletionItem[] | undefined;
-      if (stub) items = await this.functionBody(doc, pos, offset, stub, ac.signal);
-      else items = await this.fim(doc, pos, offset, ac.signal);
+      if (cfg().get('autoFunction', true)) {
+        const text = doc.getText();
+        const unit = indentUnit(doc);
+        const ins = detectInstruction(text, offset, doc.languageId);
+        const stub = ins ? undefined : detectStub(text, offset, doc.languageId, unit);
+        if (ins || stub) items = await this.smart(doc, pos, offset, unit, stub, ins, ac.signal);
+      }
+      if (!items) items = await this.fim(doc, pos, offset, ac.signal);
       if (!items || token.isCancellationRequested) return;
       this.cache.set(key, items);
       if (this.cache.size > 50) this.cache.delete(this.cache.keys().next().value!);
@@ -364,8 +450,11 @@ class Completer implements vscode.InlineCompletionItemProvider {
 
   private async fim(doc: vscode.TextDocument, pos: vscode.Position, offset: number, signal: AbortSignal) {
     const { before, after } = windowAround(doc, offset, 6000, 2000);
+    // Název souboru a jazyk na začátek, jinak malý model u krátkého souboru hádá jazyk.
+    const c = lineComment(doc.languageId);
+    const header = `${c.open} ${path.basename(doc.fileName)} (${langName(doc.languageId, doc.fileName)})${c.close}\n`;
     const nIndent = indentOf(doc.lineAt(pos.line).text).length;
-    let text = await infill(this.c.tab!, before, after, extraContext(doc), nIndent, signal);
+    let text = await infill(this.c.tab!, header + before, after, extraContext(doc), nIndent, signal);
     text = trimOverlap(text, after);
     const lines = text.split('\n');
     if (lines.length > 15) text = lines.slice(0, 15).join('\n');
@@ -373,55 +462,55 @@ class Completer implements vscode.InlineCompletionItemProvider {
     return [new vscode.InlineCompletionItem(text, new vscode.Range(pos, pos))];
   }
 
-  private async functionBody(
+  /** Celá funkce / kód podle komentáře velkým modelem. Pamatuje si všechna řešení pro dané místo. */
+  private async smart(
     doc: vscode.TextDocument,
     pos: vscode.Position,
     offset: number,
-    stub: Stub,
+    unit: string,
+    stub: Stub | undefined,
+    ins: Instruction | undefined,
     signal: AbortSignal,
   ) {
-    const gen = await this.c.ensureGen();
-    const { before, after } = windowAround(doc, offset, 3500, 1200);
-    const msgs = buildMessages(path.basename(doc.fileName), doc.languageId, before, after, 'body');
-    const lines: string[] = [];
-    const st = new BodyStreamer(doc.languageId, stub.signature, (l) => lines.push(l));
-    this.c.busy++;
-    this.c.render();
-    const ac = new AbortController();
-    const onAbort = () => ac.abort();
-    signal.addEventListener('abort', onAbort);
-    try {
-      for await (const piece of chatStream(gen, msgs, 700, ac.signal)) {
-        st.push(piece);
-        if (st.done) {
-          ac.abort();
-          break;
-        }
-      }
-    } catch (e) {
-      if (!ac.signal.aborted || signal.aborted) throw e;
-    } finally {
-      signal.removeEventListener('abort', onAbort);
-      this.c.busy--;
+    const loc = resolveAt(doc, offset, this.store, unit);
+    if (!loc) return;
+    let variants = this.store.ordered(loc.info.key);
+    if (!variants.length) {
+      const gen = await this.c.ensureGen();
+      this.c.busy++;
       this.c.render();
+      try {
+        const r = await generateFor(gen, doc, loc, { temperature: 0.1, signal });
+        if (signal.aborted) return;
+        await this.store.add(loc.info, { title: r.title, lines: r.lines, origin: 'ai' });
+      } finally {
+        this.c.busy--;
+        this.c.render();
+      }
+      variants = this.store.ordered(loc.info.key);
     }
-    st.end();
-    if (!lines.some((l) => l.trim())) return;
-    const g = stubGhost(lines, stub);
-    const range = new vscode.Range(g.fromLineStart ? new vscode.Position(pos.line, 0) : pos, pos);
-    return [new vscode.InlineCompletionItem(g.text, range)];
+    // Doporučené první; ostatní jde přepínat Alt+] / Alt+[.
+    return variants
+      .filter((v) => v.lines.some((l) => l.trim()))
+      .map((v) => {
+        const g = stub ? stubGhost(v.lines, stub) : instrGhost(v.lines, ins!);
+        const range = new vscode.Range(g.fromLineStart ? new vscode.Position(pos.line, 0) : pos, pos);
+        return new vscode.InlineCompletionItem(g.text, range);
+      });
   }
 }
 
 // ---------- Ctrl+Alt+Enter: dopsat funkci / kód (streamuje rovnou do souboru) ----------
 
-async function generateCommand(c: Controller): Promise<void> {
+async function generateCommand(c: Controller, store: SpotStore): Promise<void> {
   const ed = vscode.window.activeTextEditor;
   if (!ed) return;
   const doc = ed.document;
   const unit = indentUnit(doc);
   let pos = ed.selection.active;
-  const stub = detectStub(doc.getText(), doc.offsetAt(pos), doc.languageId, unit);
+  const text0 = doc.getText();
+  const ins = detectInstruction(text0, doc.offsetAt(pos), doc.languageId);
+  const stub = ins ? undefined : detectStub(text0, doc.offsetAt(pos), doc.languageId, unit);
 
   let gen: LlamaServer;
   try {
@@ -433,10 +522,8 @@ async function generateCommand(c: Controller): Promise<void> {
 
   // Připravit prázdný řádek uvnitř těla / pod komentářem, kam se bude psát.
   let inner: string;
-  let mode: 'body' | 'free';
   const lineText = doc.lineAt(pos.line).text;
   if (stub) {
-    mode = 'body';
     inner = stub.inner;
     let prep = '';
     if (stub.kind === 'inline') prep = '\n' + inner + '\n' + stub.sigIndent;
@@ -449,8 +536,12 @@ async function generateCommand(c: Controller): Promise<void> {
       await ed.edit((e) => e.replace(r, inner));
       pos = new vscode.Position(pos.line, inner.length);
     }
+  } else if (ins) {
+    inner = ins.indent; // signature pro odstranění zopakované hlavičky dodá resolveAt
+    const r = new vscode.Range(pos.line, 0, pos.line, lineText.length);
+    await ed.edit((e) => e.replace(r, inner));
+    pos = new vscode.Position(pos.line, inner.length);
   } else {
-    mode = 'free';
     inner = indentOf(lineText);
     if (lineText.trim()) {
       const end = doc.lineAt(pos.line).range.end;
@@ -461,22 +552,37 @@ async function generateCommand(c: Controller): Promise<void> {
   ed.selection = new vscode.Selection(pos, pos);
 
   const offset = doc.offsetAt(pos);
-  const { before, after } = windowAround(doc, offset, 3500, 1200);
-  const msgs = buildMessages(path.basename(doc.fileName), doc.languageId, before, after, mode);
+  // Místo pro paměť (funkce / zadání) – v prázdném stavu, ještě před psaním.
+  const loc: Located =
+    (stub || ins ? resolveAt(doc, offset, store, unit) : undefined) ??
+    (() => {
+      const { before, after } = windowAround(doc, offset, 3500, 1200);
+      return {
+        info: { key: '', kind: 'fn', label: '', uri: doc.uri.toString(), lang: doc.languageId },
+        range: [offset, offset],
+        current: [],
+        before,
+        after,
+        signature: null,
+        skipLines: [],
+        mode: 'instr',
+        replacement: (l: string[]) => indentLines(l, inner),
+      } as Located;
+    })();
+  const freeMode = !stub && !ins;
 
   let insertAt = doc.offsetAt(pos);
   let first = true;
   let chain = Promise.resolve();
   const write = (line: string) => {
-    const text = first ? line : '\n' + (line ? inner + line : '');
+    const t = first ? line : '\n' + (line ? inner + line : '');
     first = false;
     chain = chain.then(async () => {
       const p = doc.positionAt(insertAt);
-      const ok = await ed.edit((e) => e.insert(p, text), { undoStopBefore: false, undoStopAfter: false });
-      if (ok) insertAt += text.length;
+      const ok = await ed.edit((e) => e.insert(p, t), { undoStopBefore: false, undoStopAfter: false });
+      if (ok) insertAt += t.length;
     });
   };
-  const st = new BodyStreamer(doc.languageId, mode === 'body' ? stub!.signature : null, write);
 
   const ac = new AbortController();
   const stopOnSwitch = vscode.window.onDidChangeActiveTextEditor(() => ac.abort());
@@ -487,28 +593,172 @@ async function generateCommand(c: Controller): Promise<void> {
       { location: vscode.ProgressLocation.Notification, title: 'Octomilka píše…', cancellable: true },
       async (_p, token) => {
         token.onCancellationRequested(() => ac.abort());
-        try {
-          for await (const piece of chatStream(gen, msgs, 1200, ac.signal)) {
-            st.push(piece);
-            if (st.done) {
-              ac.abort();
-              break;
-            }
-          }
-        } catch (e) {
-          if (!ac.signal.aborted) throw e;
-        }
-        st.end();
+        const msgsMode = freeMode ? { ...loc, mode: 'free' as const } : loc;
+        const r = await generateFor(gen, doc, msgsMode as Located, { temperature: 0.1, signal: ac.signal, onLine: write });
         await chain;
+        if (!freeMode && loc.info.key && !ac.signal.aborted) await store.add(loc.info, { title: r.title, lines: r.lines, origin: 'ai' });
       },
     );
   } catch (e) {
-    log(`generování: ${(e as Error).message}`);
-    vscode.window.showErrorMessage(`Octomilka: ${(e as Error).message}`);
+    if (!ac.signal.aborted) {
+      log(`generování: ${(e as Error).message}`);
+      vscode.window.showErrorMessage(`Octomilka: ${(e as Error).message}`);
+    }
   } finally {
     stopOnSwitch.dispose();
     c.busy--;
     c.render();
+  }
+}
+
+// ---------- Jiné řešení + panel s historií ----------
+
+class Solutions implements PanelHost {
+  private abort?: AbortController;
+  private hints = new Map<string, number>();
+
+  constructor(
+    private c: Controller,
+    readonly store: SpotStore,
+  ) {}
+
+  private async docFor(info: SpotInfo): Promise<vscode.TextDocument> {
+    return vscode.workspace.textDocuments.find((d) => d.uri.toString() === info.uri) ?? vscode.workspace.openTextDocument(vscode.Uri.parse(info.uri));
+  }
+
+  private async find(info: SpotInfo): Promise<{ doc: vscode.TextDocument; loc: Located }> {
+    const doc = await this.docFor(info);
+    const loc = locate(doc, info, this.hints.get(info.key) ?? 0, this.store, indentUnit(doc));
+    if (!loc) throw new Error('To místo už v souboru nenacházím (změnila se hlavička funkce nebo komentář?).');
+    this.hints.set(info.key, loc.range[0]);
+    return { doc, loc };
+  }
+
+  /** Příkaz z editoru: najdi místo u kurzoru, otevři panel a vymysli jiné řešení. */
+  async fromCursor(generate: boolean): Promise<void> {
+    const ed = vscode.window.activeTextEditor;
+    if (!ed) return;
+    const doc = ed.document;
+    const offset = doc.offsetAt(ed.selection.active);
+    const loc = resolveAt(doc, offset, this.store, indentUnit(doc));
+    if (!loc) {
+      vscode.window.showInformationMessage('Octomilka: dej kurzor do funkce, nebo na prázdný řádek pod komentář se zadáním.');
+      return;
+    }
+    this.hints.set(loc.info.key, loc.range[0]);
+    if (loc.current.length) await this.store.add(loc.info, { title: 'Tvůj kód', lines: loc.current, origin: 'user', best: false });
+    SolutionsPanel.show(this, loc.info);
+    if (generate) await this.more(loc.info);
+  }
+
+  stop(): void {
+    this.abort?.abort();
+  }
+
+  /** Nevyužité nápady na jiné přístupy pro každé místo (jen v paměti této relace). */
+  private ideas = new Map<string, string[]>();
+
+  async more(info: SpotInfo, approach?: string): Promise<void> {
+    const panel = SolutionsPanel.show(this, info);
+    this.abort?.abort();
+    const ac = new AbortController();
+    this.abort = ac;
+    panel.error = undefined;
+    panel.stream = { title: '', text: '' };
+    panel.render();
+    this.c.busy++;
+    this.c.render();
+    try {
+      const gen = await this.c.ensureGen();
+      const { doc, loc } = await this.find(info);
+      const known = this.store.ordered(info.key);
+      const hasAi = known.some((v) => v.origin === 'ai');
+      const avoid = hasAi ? known.map((v) => ({ title: v.title, code: v.lines.slice(0, 18).join('\n') })) : undefined;
+
+      // Krok 1 (jen u jiného řešení): AI vyjmenuje jiné správné přístupy. Bez toho 7B model vymýšlí nesmysly.
+      if (hasAi) {
+        let list = this.ideas.get(info.key) ?? [];
+        if (approach) list = list.filter((x) => x !== approach);
+        else {
+          if (!list.length) {
+            panel.stream = { title: 'Vymýšlím jiné přístupy…', text: '' };
+            panel.render();
+            let raw = '';
+            const opts = { fileName: doc.fileName, langId: doc.languageId, before: loc.before, after: loc.after, mode: loc.mode, instruction: loc.info.instruction, avoid };
+            for await (const p of chatStream(gen, buildIdeasMessages(opts), 200, ac.signal, 0.3)) {
+              raw += p;
+              panel.stream = { title: 'Vymýšlím jiné přístupy…', text: raw };
+              panel.render();
+            }
+            const used = new Set(known.map((v) => v.title.toLowerCase()));
+            list = parseIdeas(raw).filter((x) => !used.has(x.split(':')[0].trim().toLowerCase()));
+          }
+          approach = list.shift();
+        }
+        this.ideas.set(info.key, list);
+        panel.ideas = list;
+      }
+
+      let last = 0;
+      const r = await generateFor(gen, doc, loc, {
+        temperature: hasAi ? 0.3 : 0.1, // první = nejpravděpodobnější, další podle zvoleného přístupu
+        avoid,
+        approach,
+        signal: ac.signal,
+        onRaw: (raw) => {
+          const now = Date.now();
+          if (now - last < 120) return;
+          last = now;
+          const m = /APPROACH\**\s*:\s*(.*)/i.exec(raw);
+          const title = m ? m[1].split('\n')[0].trim() : approach?.split(':')[0] ?? '';
+          panel.stream = { title, text: raw.replace(/^.*APPROACH.*\n?/im, '') };
+          panel.render();
+        },
+      });
+      if (ac.signal.aborted) return;
+      const before = this.store.ordered(info.key).length;
+      const v = await this.store.add(info, { title: r.title, lines: r.lines, origin: 'ai' });
+      panel.stream = undefined;
+      if (!v) throw new Error('AI nevrátila žádný kód.');
+      if (this.store.ordered(info.key).length === before) panel.error = 'AI zopakovala už známé řešení – zkus to znovu.';
+      await this.apply(info, v.id);
+    } catch (e) {
+      if (!ac.signal.aborted) {
+        panel.error = (e as Error).message;
+        log(`jiné řešení: ${(e as Error).message}`);
+      }
+    } finally {
+      if (this.abort === ac) this.abort = undefined;
+      panel.stream = undefined;
+      panel.render();
+      this.c.busy--;
+      this.c.render();
+    }
+  }
+
+  async apply(info: SpotInfo, id: string): Promise<void> {
+    const v = this.store.get(info.key)?.variants.find((x) => x.id === id);
+    if (!v) return;
+    try {
+      const { doc, loc } = await this.find(info);
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(doc.uri, new vscode.Range(doc.positionAt(loc.range[0]), doc.positionAt(loc.range[1])), loc.replacement(v.lines));
+      await vscode.workspace.applyEdit(edit);
+      const p = SolutionsPanel.current;
+      if (p) {
+        p.appliedId = id;
+        p.error = undefined;
+        p.render();
+      }
+      const ed = vscode.window.visibleTextEditors.find((e) => e.document === doc);
+      ed?.revealRange(new vscode.Range(doc.positionAt(loc.range[0]), doc.positionAt(loc.range[0])), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    } catch (e) {
+      const p = SolutionsPanel.current;
+      if (p) {
+        p.error = (e as Error).message;
+        p.render();
+      }
+    }
   }
 }
 
@@ -519,13 +769,17 @@ export function activate(ctx: vscode.ExtensionContext): void {
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   status.command = 'octomilka.menu';
   const c = new Controller(ctx, status);
+  const store = new SpotStore(ctx.workspaceState);
+  const sol = new Solutions(c, store);
 
   ctx.subscriptions.push(
     out,
     status,
     { dispose: () => c.dispose() },
-    vscode.languages.registerInlineCompletionItemProvider({ pattern: '**' }, new Completer(c)),
-    vscode.commands.registerCommand('octomilka.generate', () => generateCommand(c)),
+    vscode.languages.registerInlineCompletionItemProvider({ pattern: '**' }, new Completer(c, store)),
+    vscode.commands.registerCommand('octomilka.generate', () => generateCommand(c, store)),
+    vscode.commands.registerCommand('octomilka.alternative', () => sol.fromCursor(true)),
+    vscode.commands.registerCommand('octomilka.solutions', () => sol.fromCursor(false)),
     vscode.commands.registerCommand('octomilka.toggle', async () => {
       const v = !cfg().get('enabled', true);
       await cfg().update('enabled', v, vscode.ConfigurationTarget.Global);
@@ -544,6 +798,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
       items.push(
         { id: 'toggle', label: en ? '$(circle-slash) Vypnout Tab návrhy' : '$(sparkle) Zapnout Tab návrhy' },
         { id: 'gen', label: '$(wand) Dopsat funkci / kód u kurzoru', description: 'Ctrl+Alt+Enter' },
+        { id: 'alt', label: '$(versions) Jiné řešení', description: 'Alt+Shift+Enter' },
+        { id: 'sol', label: '$(history) Historie řešení u kurzoru' },
         { id: 'profile', label: '$(server) Velikost modelů…', description: PROFILES[c.profile].label },
         { id: 'redl', label: '$(refresh) Restartovat / stáhnout znovu' },
         { id: 'log', label: '$(output) Log' },
@@ -553,6 +809,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
       if (pick.id === 'setup' || pick.id === 'redl') vscode.commands.executeCommand('octomilka.setup');
       if (pick.id === 'toggle') vscode.commands.executeCommand('octomilka.toggle');
       if (pick.id === 'gen') vscode.commands.executeCommand('octomilka.generate');
+      if (pick.id === 'alt') vscode.commands.executeCommand('octomilka.alternative');
+      if (pick.id === 'sol') vscode.commands.executeCommand('octomilka.solutions');
       if (pick.id === 'log') out.show();
       if (pick.id === 'profile') {
         const opts = [

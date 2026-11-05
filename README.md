@@ -6,12 +6,18 @@ Zdarma, bez účtu, bez cloudu. Po prvním stažení funguje i úplně offline.
 - **Tab návrhy:** při psaní se objeví šedý text, Tab ho přijme.
 - **Celá funkce z názvu:** napiš hlavičku, třeba `function isPrime(n) {`, a AI navrhne celé tělo.
 - **Ctrl+Alt+Enter:** dopíše funkci (nebo kód podle komentáře nad kurzorem) rovnou do souboru a uvidíš, jak píše.
+- **Zadání komentářem:** napiš třeba `// make a function that uses .map()` (klidně česky), dej Enter a AI navrhne kód podle zadání.
+- **Jiné řešení (Alt+Shift+Enter):** AI vymyslí jiný přístup ke stejné funkci nebo zadání a vloží ho do kódu.
+  Vedle se otevře panel s historií všech řešení. ⭐ = co AI považuje za nejpravděpodobnější, ostatní jsou jiné přístupy.
+  Kliknutím na „Použít“ přepínáš mezi řešeními a pod kartami jsou další nápady AI jako tlačítka.
+  AI si řešení pamatuje (lokálně, pro každý projekt zvlášť), takže je neopakuje. Šedé návrhy jde přepínat i přes Alt+] / Alt+[.
+- **Správný jazyk:** model dostane název souboru a jazyk, takže v `.ts` píše TypeScript, v `.py` Python a tak dál.
 
 ## Instalace (pro spolužáky)
 
 1. Stáhni `octomilka-x.y.z.vsix` z [Releases](https://github.com/LukasVitek67/octomilka/releases/latest).
 2. Ve VS Code otevři Extensions (Ctrl+Shift+X), klikni na `…` vpravo nahoře a vyber **Install from VSIX…**.
-   Nebo v terminálu: `code --install-extension octomilka-0.1.0.vsix`
+   Nebo v terminálu: `code --install-extension octomilka-0.2.0.vsix`
 3. Vpravo dole vyskočí „Stáhnout“. Jednorázově se stáhne engine a modely podle toho, kolik máš RAM.
 4. Hotovo. Ve stavové liště vpravo dole uvidíš ✨ Octomilka.
 
@@ -61,7 +67,9 @@ Ve VS Code otevři složku a stiskni F5. Spustí se nové okno s extension.
 |---|---|
 | `src/extension.ts` | VS Code: Tab návrhy, příkaz Ctrl+Alt+Enter, stavová lišta, menu, instalace |
 | `src/engine.ts` | stahování, spouštění `llama-server`, volání AI, prompty, seznam modelů a profilů |
-| `src/stub.ts` | pozná prázdnou funkci u kurzoru a vyčistí výstup modelu (bez vscode, testovatelné) |
+| `src/stub.ts` | pozná prázdnou funkci / komentář se zadáním u kurzoru a vyčistí výstup modelu (bez vscode, testovatelné) |
+| `src/spots.ts` | místa v kódu (funkce, zadání) a lokální paměť všech navržených řešení |
+| `src/panel.ts`, `src/panelHtml.ts` | panel s historií řešení |
 
 Další model přidáš do `M` a `PROFILES` v `src/engine.ts`.
 

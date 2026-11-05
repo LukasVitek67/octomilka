@@ -1,5 +1,16 @@
 import assert from 'assert';
-import { detectStub, bodyLines, stubGhost, trimOverlap, looksLikeSignature } from '../src/stub';
+import {
+  detectStub,
+  bodyLines,
+  stubGhost,
+  trimOverlap,
+  looksLikeSignature,
+  detectInstruction,
+  commentText,
+  enclosingFunction,
+  bodyReplacement,
+  BodyStreamer,
+} from '../src/stub';
 
 let n = 0;
 const t = (name: string, fn: () => void) => {
@@ -85,6 +96,71 @@ t('ghost text for inline stub', () => {
 
 t('trimOverlap', () => {
   assert.equal(trimOverlap('x = 1;\n  return x;\n}', '\n}\n'), 'x = 1;\n  return x;');
+});
+
+t('comment syntax per language', () => {
+  assert.equal(commentText('  // make a map', 'typescript'), 'make a map');
+  assert.equal(commentText('# sort list', 'python'), 'sort list');
+  assert.equal(commentText('#include <stdio.h>', 'c'), undefined);
+  assert.equal(commentText('-- select users', 'sql'), 'select users');
+  assert.equal(commentText('<!-- nav bar -->', 'html'), 'nav bar');
+  assert.equal(commentText('/* center it */', 'css'), 'center it');
+  assert.equal(commentText('const x = 1; // no', 'typescript'), undefined);
+});
+
+t('instruction comment + empty line', () => {
+  const { text, off } = at('const users = [];\n// make a function that uses .map()\n|');
+  const i = detectInstruction(text, off, 'typescript')!;
+  assert.equal(i.instruction, 'make a function that uses .map()');
+  assert.equal(i.lastCommentLine, '// make a function that uses .map()');
+});
+
+t('multi-line instruction, python, indented', () => {
+  const { text, off } = at('def f(xs):\n    # vrať jen sudá čísla\n    # seřazená sestupně\n    |\n');
+  const i = detectInstruction(text, off, 'python')!;
+  assert.equal(i.instruction, 'vrať jen sudá čísla seřazená sestupně');
+  assert.equal(i.indent, '    ');
+});
+
+t('no instruction when code follows / lint comment', () => {
+  const a = at('// sum the list\n|\nconst y = 2;\n');
+  assert.equal(detectInstruction(a.text, a.off, 'typescript'), undefined);
+  const b = at('// eslint-disable-next-line\n|');
+  assert.equal(detectInstruction(b.text, b.off, 'typescript'), undefined);
+});
+
+t('enclosing function + body replacement', () => {
+  const src = 'function f(a) {\n  const s = "}";\n  return a;\n}\n';
+  const f = enclosingFunction(src, src.indexOf('return'), 'javascript', '  ')!;
+  assert.equal(f.signature, 'function f(a) {');
+  assert.equal(src[f.bodyEnd], '}');
+  assert.equal(f.bodyEnd, src.lastIndexOf('}'));
+  const out = src.slice(0, f.bodyStart) + bodyReplacement(['return a * 2;'], f, 'javascript') + src.slice(f.bodyEnd);
+  assert.equal(out, 'function f(a) {\n  return a * 2;\n}\n');
+});
+
+t('python enclosing function', () => {
+  const src = 'def f(a):\n    x = a\n    return x\n\nprint(1)\n';
+  const f = enclosingFunction(src, src.indexOf('return'), 'python', '    ')!;
+  const out = src.slice(0, f.bodyStart) + bodyReplacement(['return a'], f, 'python') + src.slice(f.bodyEnd);
+  assert.equal(out, 'def f(a):\n    return a\n\nprint(1)\n');
+});
+
+t('APPROACH line becomes title', () => {
+  const lines: string[] = [];
+  const s = new BodyStreamer('typescript', 'function f(xs) {', (l) => lines.push(l), []);
+  s.push('APPROACH: Set-based dedupe\nreturn [...new Set(xs)];\n');
+  s.end();
+  assert.equal(s.title, 'Set-based dedupe');
+  assert.deepEqual(lines, ['return [...new Set(xs)];']);
+});
+
+t('echoed instruction comment is skipped', () => {
+  const lines: string[] = [];
+  const s = new BodyStreamer('typescript', null, (l) => lines.push(l), ['// double all']);
+  s.push('// APPROACH: map\n// double all\nconst d = xs.map((x) => x * 2);');
+  s.end();
+  assert.deepEqual(lines, ['const d = xs.map((x) => x * 2);']);
 });
 
 console.log(`${n} tests passed`);

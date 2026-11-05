@@ -90,10 +90,183 @@ export function detectStub(text: string, offset: number, lang: string, indentUni
   return undefined;
 }
 
+// ---------- komentáře ----------
+
+const HASH = new Set([
+  'python', 'shellscript', 'ruby', 'perl', 'r', 'yaml', 'toml', 'powershell', 'dockerfile', 'makefile',
+  'coffeescript', 'julia', 'elixir', 'nim', 'crystal', 'properties', 'dotenv', 'gdscript',
+]);
+const DASH = new Set(['sql', 'lua', 'haskell', 'ada', 'elm', 'plsql']);
+const PCT = new Set(['matlab', 'latex', 'tex', 'erlang', 'prolog']);
+const SEMI = new Set(['clojure', 'lisp', 'scheme', 'ini', 'asm', 'racket']);
+const XML = new Set(['html', 'xml', 'markdown', 'svg', 'xsl', 'razor']);
+const CSS = new Set(['css', 'scss', 'less']);
+
+/** Jak se v jazyce píše jednořádkový komentář. */
+export function lineComment(lang: string): { open: string; close: string } {
+  if (HASH.has(lang)) return { open: '#', close: '' };
+  if (DASH.has(lang)) return { open: '--', close: '' };
+  if (PCT.has(lang)) return { open: '%', close: '' };
+  if (SEMI.has(lang)) return { open: ';', close: '' };
+  if (XML.has(lang)) return { open: '<!--', close: ' -->' };
+  if (CSS.has(lang)) return { open: '/*', close: ' */' };
+  return { open: '//', close: '' };
+}
+
+/** Text komentáře na řádku, nebo undefined, když řádek není (celý) komentář. */
+export function commentText(line: string, lang: string): string | undefined {
+  const t = line.trim();
+  let m: RegExpExecArray | null;
+  if (HASH.has(lang)) return (m = /^#+\s?(.*)$/.exec(t)) && !t.startsWith('#!') ? m[1] : undefined;
+  if (DASH.has(lang)) return (m = /^--+\s?(.*)$/.exec(t)) ? m[1] : undefined;
+  if (PCT.has(lang)) return (m = /^%+\s?(.*)$/.exec(t)) ? m[1] : undefined;
+  if (SEMI.has(lang)) return (m = /^;+\s?(.*)$/.exec(t)) ? m[1] : undefined;
+  if ((m = /^<!--\s?(.*?)\s*-->$/.exec(t))) return m[1];
+  if ((m = /^\/\*+\s?(.*?)\s*\*\/$/.exec(t))) return m[1];
+  if (!CSS.has(lang) && !XML.has(lang) && (m = /^\/\/+\s?(.*)$/.exec(t))) return m[1];
+  if (lang === 'php' && (m = /^#\s?(.*)$/.exec(t))) return m[1];
+  return undefined;
+}
+
+const NOT_INSTRUCTION = /^(eslint|@ts-|prettier|#?region|#?endregion|noinspection|pylint|type:|noqa|istanbul|jshint|copyright|license|-{3,}|={3,}|\*+$)/i;
+
+export interface Instruction {
+  instruction: string; // spojený text komentáře
+  lastCommentLine: string; // poslední řádek komentáře (trim) – klíč do paměti
+  indent: string; // odsazení komentáře = odsazení kódu
+  curBefore: string;
+}
+
+/**
+ * Uživatel napsal komentář jako zadání a odentroval:
+ *   // make a function that uses .map()
+ *   |
+ * Pod kurzorem nesmí rovnou pokračovat existující kód.
+ */
+export function detectInstruction(text: string, offset: number, lang: string): Instruction | undefined {
+  const before = text.slice(0, offset);
+  const after = text.slice(offset);
+  const lineStart = before.lastIndexOf('\n') + 1;
+  const curBefore = before.slice(lineStart);
+  const nl = after.indexOf('\n');
+  const curAfter = nl < 0 ? after : after.slice(0, nl);
+  if (curBefore.trim() !== '' || curAfter.trim() !== '') return undefined;
+
+  const prev = before.slice(0, Math.max(0, lineStart - 1)).split('\n');
+  const parts: string[] = [];
+  let i = prev.length - 1;
+  let last = '';
+  let indent = '';
+  if (lineStart === 0) return undefined;
+  for (; i >= 0 && parts.length < 8; i--) {
+    const c = commentText(prev[i], lang);
+    if (c === undefined) break;
+    if (!parts.length) {
+      last = prev[i].trim();
+      indent = indentOf(prev[i]);
+    }
+    parts.unshift(c.trim());
+  }
+  if (!parts.length) return undefined;
+  const instruction = parts.filter(Boolean).join(' ').trim();
+  if (instruction.length < 6 || !/\p{L}{3,}/u.test(instruction) || NOT_INSTRUCTION.test(instruction)) return undefined;
+
+  const next = nl < 0 ? undefined : after.slice(nl + 1).split('\n')[0];
+  if (next !== undefined && next.trim() && !isClosing(next.trim()) && indentOf(next).length >= indent.length) return undefined;
+  return { instruction, lastCommentLine: last, indent, curBefore };
+}
+
+// ---------- hledání funkce kolem kurzoru (pro "jiné řešení") ----------
+
+/** Index párové `}` k `{` na pozici open; přeskakuje řetězce a komentáře. */
+export function matchBrace(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      for (i++; i < text.length && text[i] !== ch; i++) if (text[i] === '\\') i++;
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '/') {
+      const e = text.indexOf('\n', i);
+      if (e < 0) return -1;
+      i = e;
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '*') {
+      const e = text.indexOf('*/', i + 2);
+      if (e < 0) return -1;
+      i = e + 1;
+      continue;
+    }
+    if (ch === '{') depth++;
+    else if (ch === '}' && --depth === 0) return i;
+  }
+  return -1;
+}
+
+export interface FnRange {
+  signature: string;
+  sigIndent: string;
+  inner: string;
+  bodyStart: number; // hned za `{` / za koncem řádku `def …:`
+  bodyEnd: number; // pozice párové `}` / konec posledního řádku těla
+}
+
+export function functionAt(text: string, sigLineStart: number, lang: string, indentUnit: string): FnRange | undefined {
+  let eol = text.indexOf('\n', sigLineStart);
+  if (eol < 0) eol = text.length;
+  const line = text.slice(sigLineStart, eol);
+  if (!looksLikeSignature(line, lang)) return undefined;
+  const sigIndent = indentOf(line);
+  const base = { signature: line.trim(), sigIndent, inner: sigIndent + indentUnit };
+  if (lang === 'python') {
+    let end = eol;
+    let p = eol;
+    while (p < text.length) {
+      let e = text.indexOf('\n', p + 1);
+      if (e < 0) e = text.length;
+      const l = text.slice(p + 1, e);
+      if (l.trim() && indentOf(l).length <= sigIndent.length) break;
+      if (l.trim()) end = e;
+      p = e;
+    }
+    return { ...base, bodyStart: eol, bodyEnd: end };
+  }
+  const open = sigLineStart + line.lastIndexOf('{');
+  const close = matchBrace(text, open);
+  if (close < 0) return undefined;
+  return { ...base, bodyStart: open + 1, bodyEnd: close };
+}
+
+/** Nejbližší funkce, v jejímž těle (nebo na hlavičce) je kurzor. */
+export function enclosingFunction(text: string, offset: number, lang: string, indentUnit: string): FnRange | undefined {
+  let ls = text.lastIndexOf('\n', offset - 1) + 1;
+  for (let n = 0; n < 400 && ls >= 0; n++) {
+    const f = functionAt(text, ls, lang, indentUnit);
+    if (f && offset <= f.bodyEnd) return f;
+    if (ls === 0) break;
+    ls = text.lastIndexOf('\n', ls - 2) + 1;
+  }
+  return undefined;
+}
+
+/** Text, který nahradí tělo funkce [bodyStart, bodyEnd). */
+export function bodyReplacement(lines: string[], f: FnRange, lang: string): string {
+  const body = lines.map((l) => (l ? f.inner + l : '')).join('\n');
+  return lang === 'python' ? '\n' + body : '\n' + body + '\n' + f.sigIndent;
+}
+
+/** Odsadí řádky volného kódu (např. pod komentářem). */
+export function indentLines(lines: string[], indent: string): string {
+  return lines.map((l) => (l ? indent + l : '')).join('\n');
+}
+
 /**
  * Proudově čte výstup modelu po řádcích a vydává čisté řádky těla
  * (bez markdownu, bez zopakované hlavičky a bez uzavírací závorky),
  * odsazené relativně k tělu (0 = úroveň těla).
+ * Řádek `APPROACH: …` na začátku uloží do `title`.
  */
 export class BodyStreamer {
   private buf = '';
@@ -103,11 +276,13 @@ export class BodyStreamer {
   private pending: string | null = null;
   private blanks = 0;
   done = false;
+  title = '';
 
   constructor(
     private lang: string,
     private signature: string | null, // null = volný režim (ne tělo funkce)
     private emit: (line: string) => void,
+    private skipLines: string[] = [], // řádky (trim), které model může zopakovat, např. komentář se zadáním
   ) {}
 
   push(chunk: string): void {
@@ -135,6 +310,12 @@ export class BodyStreamer {
     }
     if (!this.started) {
       if (!t) return;
+      const ap = /^(?:\/\/+|#+|--|;+|%|\/\*+|<!--)?\s*\**APPROACH\**\s*:\s*(.*?)\s*(?:\*\/|-->)?$/i.exec(t);
+      if (ap) {
+        if (!this.title) this.title = ap[1].replace(/[`*]/g, '').trim();
+        return;
+      }
+      if (this.skipLines.includes(t)) return;
       if (this.signature !== null && this.isEcho(l)) {
         this.echoed = true;
         return;

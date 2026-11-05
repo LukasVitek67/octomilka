@@ -213,7 +213,9 @@ export class LlamaServer {
     const dir = path.dirname(this.bin);
     const env = { ...process.env };
     if (process.platform === 'linux') env.LD_LIBRARY_PATH = dir + (env.LD_LIBRARY_PATH ? ':' + env.LD_LIBRARY_PATH : '');
-    const args = ['-m', this.model, '--host', '127.0.0.1', '--port', String(this.port), '-ngl', ngl, ...this.args];
+    // CPU = žádné zařízení, jinak by si llama.cpp i s -ngl 0 bral video paměť na výpočetní buffery.
+    const dev = ngl === '0' ? ['-ngl', '0', '--device', 'none'] : ['-ngl', ngl];
+    const args = ['-m', this.model, '--host', '127.0.0.1', '--port', String(this.port), ...dev, ...this.args];
     this.log(`[${this.name}] start: ${path.basename(this.bin)} ${args.join(' ')}`);
     const p = spawn(this.bin, args, { cwd: dir, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     this.proc = p;
@@ -316,13 +318,14 @@ export async function* chatStream(
   messages: ChatMsg[],
   maxTokens: number,
   signal: AbortSignal,
+  temperature = 0.1,
 ): AsyncGenerator<string> {
   s.lastUsed = Date.now();
   const r = await fetch(s.url + '/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     signal,
-    body: JSON.stringify({ messages, max_tokens: maxTokens, temperature: 0.2, top_p: 0.9, stream: true, cache_prompt: true }),
+    body: JSON.stringify({ messages, max_tokens: maxTokens, temperature, top_p: 0.95, stream: true, cache_prompt: true }),
   });
   if (!r.ok || !r.body) throw new Error(`chat HTTP ${r.status}: ${(await r.text()).slice(0, 300)}`);
   const reader = r.body.getReader();
@@ -350,28 +353,139 @@ export async function* chatStream(
   }
 }
 
-export function buildMessages(
-  fileName: string,
-  lang: string,
-  before: string,
-  after: string,
-  mode: 'body' | 'free',
-): ChatMsg[] {
-  const rules =
-    mode === 'body'
-      ? `The file contains a function whose body is empty; the cursor is marked <FILL_HERE>. ` +
-        `Write a complete, correct, idiomatic implementation of that function body. Infer what it must do from ` +
-        `the function name, parameters, types, comments and the rest of the file. ` +
-        `Output ONLY the body statements: no function signature, no closing brace of the function, ` +
-        `no markdown fences, no explanation.`
-      : `The cursor is marked <FILL_HERE>. Write the code that belongs there, following any comment or ` +
-        `instruction directly above the cursor. Output ONLY the code to insert: no markdown fences, ` +
-        `no explanation, do not repeat code that is already in the file.`;
+const LANG_NAMES: Record<string, string> = {
+  typescript: 'TypeScript',
+  typescriptreact: 'TypeScript (React TSX)',
+  javascript: 'JavaScript',
+  javascriptreact: 'JavaScript (React JSX)',
+  python: 'Python',
+  csharp: 'C#',
+  cpp: 'C++',
+  c: 'C',
+  java: 'Java',
+  go: 'Go',
+  rust: 'Rust',
+  php: 'PHP',
+  ruby: 'Ruby',
+  kotlin: 'Kotlin',
+  swift: 'Swift',
+  dart: 'Dart',
+  lua: 'Lua',
+  r: 'R',
+  sql: 'SQL',
+  shellscript: 'Bash',
+  powershell: 'PowerShell',
+  html: 'HTML',
+  css: 'CSS',
+  scss: 'SCSS',
+  less: 'Less',
+  vue: 'Vue (single-file component)',
+  svelte: 'Svelte',
+  json: 'JSON',
+  yaml: 'YAML',
+  markdown: 'Markdown',
+  vb: 'Visual Basic .NET',
+  fsharp: 'F#',
+  scala: 'Scala',
+  haskell: 'Haskell',
+  elixir: 'Elixir',
+  perl: 'Perl',
+  julia: 'Julia',
+  zig: 'Zig',
+  gdscript: 'GDScript',
+};
+
+/** Lidský název jazyka podle VS Code languageId (a přípony jako záloha). */
+export function langName(langId: string, fileName = ''): string {
+  if (LANG_NAMES[langId]) return LANG_NAMES[langId];
+  const ext = path.extname(fileName).slice(1);
+  return langId && langId !== 'plaintext' ? langId : ext || 'plain text';
+}
+
+export interface PromptOpts {
+  fileName: string;
+  langId: string;
+  before: string;
+  after: string;
+  mode: 'body' | 'instr' | 'free';
+  instruction?: string;
+  /** Už navržená řešení, která se nemají opakovat. */
+  avoid?: { title: string; code: string }[];
+  /** Konkrétní přístup, kterým se má řešení napsat (z kroku "nápady"). */
+  approach?: string;
+}
+
+/** Krok 1 u "jiného řešení": AI jen vyjmenuje jiné správné přístupy (krátké, rychlé). */
+export function buildIdeasMessages(o: PromptOpts): ChatMsg[] {
+  const lang = langName(o.langId, o.fileName);
+  const what =
+    o.mode === 'body'
+      ? 'the body of the empty function at <FILL_HERE>'
+      : o.mode === 'instr'
+        ? `the code at <FILL_HERE> for this instruction: "${o.instruction}"`
+        : 'the code at <FILL_HERE>';
+  const known = (o.avoid ?? []).map((a, i) => `${i + 1}. ${a.title}\n${a.code}`).join('\n\n');
   return [
     {
       role: 'system',
-      content: `You are an expert ${lang} programmer working as a code completion engine inside a code editor. ${rules}`,
+      content:
+        `You are an expert ${lang} programmer. List exactly 3 genuinely different, correct ways to implement ${what}. ` +
+        `Each must keep the same signature and types and work for every input. They must differ from the already ` +
+        `proposed solutions in algorithm, data structure, library API or style. Most sensible and idiomatic first. ` +
+        `Output only 3 lines in this format, no code, no other text:\n- <3-7 word name>: <one short sentence how>`,
     },
-    { role: 'user', content: `File: ${fileName}\n\n${before}<FILL_HERE>${after}` },
+    {
+      role: 'user',
+      content: `File: ${path.basename(o.fileName)} (${lang})\n\n${o.before}<FILL_HERE>${o.after}\n\nAlready proposed:\n\n${known || '(none)'}`,
+    },
+  ];
+}
+
+export function parseIdeas(text: string): string[] {
+  return text
+    .split('\n')
+    .map((l) => l.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '').replace(/\*\*/g, '').trim())
+    .filter((l) => l.length > 4 && !/^```/.test(l))
+    .slice(0, 3);
+}
+
+export function buildMessages(o: PromptOpts): ChatMsg[] {
+  const lang = langName(o.langId, o.fileName);
+  let task: string;
+  if (o.mode === 'body')
+    task =
+      `The file contains a function whose body is empty; the cursor is marked <FILL_HERE>. ` +
+      `Write a complete, correct, idiomatic implementation of that function body. Infer what it must do from ` +
+      `the function name, parameters, types, any comment above it and the rest of the file. ` +
+      `Output the body statements only: no function signature, no closing brace of the function.`;
+  else if (o.mode === 'instr')
+    task =
+      `The developer wrote an instruction as a code comment directly above <FILL_HERE>:\n"${o.instruction}"\n` +
+      `Understand what they want (the comment may be in any human language) and write the code that fulfils it ` +
+      `at <FILL_HERE>. Do not repeat the comment.`;
+  else
+    task =
+      `Write the code that belongs at <FILL_HERE>, following any comment directly above it. ` +
+      `Do not repeat code that is already in the file.`;
+  const rules =
+    `The file is ${lang} (${path.basename(o.fileName)}). Write ONLY valid ${lang} that fits this file, its imports, ` +
+    `types and style - never a different programming language. ` +
+    `The code must be correct for every input including edge cases (empty input, 0, 1, 2, negative numbers, null). ` +
+    `Prefer clear, readable statements over clever one-liners. ` +
+    `Start your answer with one line "APPROACH: <3-6 word name of the technique>", then the code only: ` +
+    `no markdown fences, no explanation.`;
+  let user = `File: ${path.basename(o.fileName)} (${lang})\n\n${o.before}<FILL_HERE>${o.after}`;
+  if (o.approach) user += `\n\nImplement it using exactly this approach: ${o.approach}`;
+  if (o.avoid?.length)
+    user +=
+      `\n\nThese approaches were ALREADY proposed for <FILL_HERE>. Do NOT repeat any of them. Write a genuinely ` +
+      `different solution: another algorithm, data structure, standard-library API or style (loop vs. functional, ` +
+      `recursion, lookup table...). It must keep exactly the same signature, parameter types and return type and ` +
+      `be just as correct for every input. Correctness matters more than novelty - never use a gimmick that ` +
+      `changes types or breaks edge cases. Already proposed:\n\n` +
+      o.avoid.map((a, i) => `${i + 1}. ${a.title}\n${a.code}`).join('\n\n');
+  return [
+    { role: 'system', content: `You are an expert ${lang} programmer working as a code completion engine inside a code editor. ${task}\n${rules}` },
+    { role: 'user', content: user },
   ];
 }
