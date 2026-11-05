@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": { "outDir": "out-test", "rootDir": "." },
-  "include": ["src/stub.ts", "src/engine.ts", "test"]
+  "include": ["src/stub.ts", "src/engine.ts", "src/updater.ts", "test"]
 }

@@ -17,9 +17,22 @@ Zdarma, bez účtu, bez cloudu. Po prvním stažení funguje i úplně offline.
 
 1. Stáhni `octomilka-x.y.z.vsix` z [Releases](https://github.com/LukasVitek67/octomilka/releases/latest).
 2. Ve VS Code otevři Extensions (Ctrl+Shift+X), klikni na `…` vpravo nahoře a vyber **Install from VSIX…**.
-   Nebo v terminálu: `code --install-extension octomilka-0.2.0.vsix`
+   Nebo v terminálu: `code --install-extension octomilka-0.3.0.vsix`
 3. Vpravo dole vyskočí „Stáhnout“. Jednorázově se stáhne engine a modely podle toho, kolik máš RAM.
 4. Hotovo. Ve stavové liště vpravo dole uvidíš ✨ Octomilka.
+
+## Aktualizace
+
+Od verze 0.3.0 se Octomilka aktualizuje sama z [GitHub Releases](https://github.com/LukasVitek67/octomilka/releases).
+Max. 2× denně se podívá, jestli je nová verze. Když ano, stáhne `.vsix`, ověří jeho otisk SHA256 a nainstaluje ho.
+Pak nabídne znovu načíst okno. Modely zůstávají, nic dalšího se nestahuje.
+
+- Nastavení `octomilka.autoUpdate`: `auto` (výchozí), `notify` (jen upozorní) nebo `off`.
+- Ručně: menu Octomilka → **Zkontrolovat aktualizace**.
+- Fork se aktualizuje ze svého repa podle pole `repository` v `package.json`.
+- Kdo má 0.1 nebo 0.2, musí 0.3.0 nainstalovat jednou ručně. Pak už se aktualizuje sám.
+
+Nové vydání: zvýšit `version` v `package.json`, `npm run package` a vytvořit release s tagem `vX.Y.Z` a přiloženým `.vsix`.
 
 ## Jaké modely se stáhnou
 
@@ -70,6 +83,7 @@ Ve VS Code otevři složku a stiskni F5. Spustí se nové okno s extension.
 | `src/stub.ts` | pozná prázdnou funkci / komentář se zadáním u kurzoru a vyčistí výstup modelu (bez vscode, testovatelné) |
 | `src/spots.ts` | místa v kódu (funkce, zadání) a lokální paměť všech navržených řešení |
 | `src/panel.ts`, `src/panelHtml.ts` | panel s historií řešení |
+| `src/updater.ts` | automatické aktualizace z GitHub Releases (ověření SHA256) |
 
 Další model přidáš do `M` a `PROFILES` v `src/engine.ts`.
 

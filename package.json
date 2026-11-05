@@ -2,7 +2,7 @@
   "name": "octomilka",
   "displayName": "Octomilka – lokální AI doplňování kódu",
   "description": "Doplňování kódu ve stylu Copilota, které běží celé na tvém PC. Zdarma, offline, bez účtu.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "lukas-vitek",
   "license": "MIT",
   "repository": {
@@ -62,6 +62,10 @@
       {
         "command": "octomilka.log",
         "title": "Octomilka: Zobrazit log"
+      },
+      {
+        "command": "octomilka.checkUpdates",
+        "title": "Octomilka: Zkontrolovat aktualizace"
       }
     ],
     "keybindings": [
@@ -136,6 +140,21 @@
           "type": "number",
           "default": 15,
           "description": "Po kolika minutách nečinnosti uvolnit velký model z RAM."
+        },
+        "octomilka.autoUpdate": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "notify",
+            "off"
+          ],
+          "enumDescriptions": [
+            "Novou verzi z GitHubu sám stáhne, ověří (SHA256) a nainstaluje, pak nabídne načíst okno znovu",
+            "Jen upozorní, že je nová verze, a nainstaluje ji po kliknutí",
+            "Nekontrolovat aktualizace"
+          ],
+          "default": "auto",
+          "description": "Automatické aktualizace z GitHub Releases (kontrola max. 2× denně)."
         }
       }
     }
@@ -144,7 +163,7 @@
     "build": "esbuild src/extension.ts --bundle --platform=node --target=node18 --format=cjs --external:vscode --outfile=dist/extension.js --minify",
     "watch": "esbuild src/extension.ts --bundle --platform=node --target=node18 --format=cjs --external:vscode --outfile=dist/extension.js --sourcemap --watch",
     "typecheck": "tsc --noEmit",
-    "test": "tsc -p tsconfig.test.json && node out-test/test/stub.test.js",
+    "test": "tsc -p tsconfig.test.json && node out-test/test/stub.test.js && node out-test/test/updater.test.js",
     "package": "npm run build && vsce package --no-dependencies"
   },
   "devDependencies": {

@@ -35,6 +35,7 @@ import {
 } from './stub';
 import { SpotStore, SpotInfo, Located, resolveAt, locate } from './spots';
 import { SolutionsPanel, PanelHost } from './panel';
+import { repoFrom, latestRelease, compareVersions, downloadRelease, shortNotes, Release } from './updater';
 
 type State = 'off' | 'needsSetup' | 'downloading' | 'starting' | 'ready' | 'error';
 
@@ -762,6 +763,96 @@ class Solutions implements PanelHost {
   }
 }
 
+// ---------- automatické aktualizace (GitHub Releases) ----------
+
+class Updater {
+  private timer?: NodeJS.Timeout;
+  private running = false;
+
+  constructor(private ctx: vscode.ExtensionContext) {}
+
+  get current(): string {
+    return this.ctx.extension.packageJSON.version;
+  }
+  get repo(): string | undefined {
+    return repoFrom(this.ctx.extension.packageJSON.repository?.url);
+  }
+
+  start(): void {
+    if (this.ctx.extensionMode !== vscode.ExtensionMode.Production) return; // při vývoji (F5) neaktualizovat
+    setTimeout(() => void this.check(false), 20_000);
+    this.timer = setInterval(() => void this.check(false), 6 * 3600_000);
+  }
+
+  dispose(): void {
+    if (this.timer) clearInterval(this.timer);
+  }
+
+  async check(manual: boolean): Promise<void> {
+    const mode = cfg().get<string>('autoUpdate', 'auto');
+    if (!manual && mode === 'off') return;
+    if (this.running) return;
+    const last = this.ctx.globalState.get<number>('updateCheckedAt', 0);
+    if (!manual && Date.now() - last < 12 * 3600_000) return;
+    const repo = this.repo;
+    if (!repo) {
+      if (manual) vscode.window.showWarningMessage('Octomilka: v package.json chybí GitHub repozitář, nemám odkud aktualizovat.');
+      return;
+    }
+    this.running = true;
+    try {
+      const rel = await latestRelease(repo);
+      await this.ctx.globalState.update('updateCheckedAt', Date.now());
+      if (!rel || compareVersions(rel.version, this.current) <= 0) {
+        if (manual) vscode.window.showInformationMessage(`Octomilka: máš nejnovější verzi (${this.current}).`);
+        return;
+      }
+      log(`Nová verze ${rel.version} (mám ${this.current}).`);
+      if (!manual && this.ctx.globalState.get('updateSkip') === rel.version) return;
+      if (mode === 'auto' && !manual) await this.install(rel, false);
+      else await this.offer(rel);
+    } catch (e) {
+      log(`aktualizace: ${(e as Error).message}`);
+      if (manual) vscode.window.showErrorMessage(`Octomilka: kontrola aktualizací selhala – ${(e as Error).message}`);
+    } finally {
+      this.running = false;
+    }
+  }
+
+  private async offer(rel: Release): Promise<void> {
+    const notes = shortNotes(rel.notes);
+    const pick = await vscode.window.showInformationMessage(
+      `Octomilka ${rel.version} je venku (máš ${this.current}).${notes ? ' ' + notes : ''}`,
+      'Aktualizovat',
+      'Co je nového',
+      'Přeskočit tuto verzi',
+    );
+    if (pick === 'Aktualizovat') await this.install(rel, true);
+    if (pick === 'Co je nového') void vscode.env.openExternal(vscode.Uri.parse(rel.url));
+    if (pick === 'Přeskočit tuto verzi') await this.ctx.globalState.update('updateSkip', rel.version);
+  }
+
+  private async install(rel: Release, withProgress: boolean): Promise<void> {
+    const dir = path.join(this.ctx.globalStorageUri.fsPath, 'updates');
+    const run = async () => {
+      await fsp.rm(dir, { recursive: true, force: true });
+      const vsix = await downloadRelease(rel, dir); // ověří velikost + SHA256 z GitHubu
+      await vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(vsix));
+    };
+    if (withProgress)
+      await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Octomilka: instaluju ${rel.version}…` }, run);
+    else await run();
+    log(`Nainstalována verze ${rel.version}, projeví se po načtení okna.`);
+    const pick = await vscode.window.showInformationMessage(
+      `Octomilka se aktualizovala na ${rel.version}. Projeví se po znovunačtení okna.`,
+      'Načíst znovu',
+      'Co je nového',
+    );
+    if (pick === 'Načíst znovu') void vscode.commands.executeCommand('workbench.action.reloadWindow');
+    if (pick === 'Co je nového') void vscode.env.openExternal(vscode.Uri.parse(rel.url));
+  }
+}
+
 // ---------- aktivace ----------
 
 export function activate(ctx: vscode.ExtensionContext): void {
@@ -771,11 +862,14 @@ export function activate(ctx: vscode.ExtensionContext): void {
   const c = new Controller(ctx, status);
   const store = new SpotStore(ctx.workspaceState);
   const sol = new Solutions(c, store);
+  const upd = new Updater(ctx);
 
   ctx.subscriptions.push(
     out,
     status,
     { dispose: () => c.dispose() },
+    { dispose: () => upd.dispose() },
+    vscode.commands.registerCommand('octomilka.checkUpdates', () => upd.check(true)),
     vscode.languages.registerInlineCompletionItemProvider({ pattern: '**' }, new Completer(c, store)),
     vscode.commands.registerCommand('octomilka.generate', () => generateCommand(c, store)),
     vscode.commands.registerCommand('octomilka.alternative', () => sol.fromCursor(true)),
@@ -802,6 +896,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
         { id: 'sol', label: '$(history) Historie řešení u kurzoru' },
         { id: 'profile', label: '$(server) Velikost modelů…', description: PROFILES[c.profile].label },
         { id: 'redl', label: '$(refresh) Restartovat / stáhnout znovu' },
+        { id: 'upd', label: '$(sync) Zkontrolovat aktualizace', description: `verze ${upd.current}` },
         { id: 'log', label: '$(output) Log' },
       );
       const pick = await vscode.window.showQuickPick(items, { title: 'Octomilka – lokální AI' });
@@ -812,6 +907,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
       if (pick.id === 'alt') vscode.commands.executeCommand('octomilka.alternative');
       if (pick.id === 'sol') vscode.commands.executeCommand('octomilka.solutions');
       if (pick.id === 'log') out.show();
+      if (pick.id === 'upd') void upd.check(true);
       if (pick.id === 'profile') {
         const opts = [
           { id: 'auto', label: 'Automaticky', description: `podle RAM → ${PROFILES[autoProfile()].label}` },
@@ -834,6 +930,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
 
   c.render();
   void c.init(false);
+  upd.start();
 }
 
 export function deactivate(): void {}
