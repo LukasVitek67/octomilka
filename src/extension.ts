@@ -32,12 +32,14 @@ import {
   lineComment,
   Stub,
   Instruction,
+  nameOf,
 } from './stub';
 import { SpotStore, SpotInfo, Located, resolveAt, locate } from './spots';
-import { SolutionsPanel, PanelHost } from './panel';
 import { repoFrom, latestRelease, compareVersions, downloadRelease, shortNotes, Release } from './updater';
+import { Activity } from './activity';
+import { OctoView, ViewHost } from './view';
 
-type State = 'off' | 'needsSetup' | 'downloading' | 'starting' | 'ready' | 'error';
+export type State = 'off' | 'needsSetup' | 'downloading' | 'starting' | 'ready' | 'error';
 
 let out: vscode.OutputChannel;
 const log = (m: string) => out.appendLine(`${new Date().toLocaleTimeString()} ${m}`);
@@ -53,6 +55,13 @@ class Controller {
   gen?: LlamaServer;
   private initRun?: Promise<void>;
   private idleTimer: NodeJS.Timeout;
+  /** Změna stavu → panel se překreslí. */
+  readonly changed = new vscode.EventEmitter<void>();
+  /** Kolik se bude stahovat při instalaci (pro tlačítko v panelu). */
+  get downloadSize(): string {
+    const p = PROFILES[this.profile];
+    return fmtGB(p.tab.bytes + p.gen.bytes + 40e6);
+  }
 
   constructor(
     private ctx: vscode.ExtensionContext,
@@ -107,7 +116,9 @@ class Controller {
           `Ctrl+Alt+Enter = dopsat funkci\nVše běží lokálně na tomto PC.`;
         break;
     }
+    s.tooltip += '\n\nKlikni = otevřít panel Octomilka dole';
     s.show();
+    this.changed.fire();
   }
 
   setState(s: State): void {
@@ -335,6 +346,8 @@ function windowAround(doc: vscode.TextDocument, offset: number, beforeChars: num
 interface GenResult {
   title: string;
   lines: string[];
+  /** Jistota AI 0–1: geometrický průměr pravděpodobností tokenů kódu (bez řádku APPROACH). */
+  confidence?: number;
 }
 
 async function generateFor(
@@ -345,9 +358,12 @@ async function generateFor(
     temperature: number;
     avoid?: { title: string; code: string }[];
     approach?: string;
+    must?: string[];
+    mustNot?: string[];
     signal: AbortSignal;
     onLine?: (l: string) => void;
     onRaw?: (t: string) => void;
+    onToken?: () => void;
   },
 ): Promise<GenResult> {
   const msgs = buildMessages({
@@ -359,6 +375,8 @@ async function generateFor(
     instruction: loc.info.instruction,
     avoid: opts.avoid,
     approach: opts.approach,
+    must: opts.must,
+    mustNot: opts.mustNot,
   });
   const lines: string[] = [];
   const st = new BodyStreamer(doc.languageId, loc.signature, (l) => {
@@ -369,10 +387,22 @@ async function generateFor(
   const onAbort = () => ac.abort();
   opts.signal.addEventListener('abort', onAbort);
   let raw = '';
+  // jistota: jen tokeny kódu, ne úvodní řádek "APPROACH: …"
+  let sum = 0;
+  let n = 0;
+  let seen = '';
+  const onLogprob = (lp: number, tok: string) => {
+    const inHeader = /^\s*\W*APPROACH/i.test(seen) && !seen.includes('\n');
+    seen += tok;
+    if (inHeader || st.done || !tok.trim()) return;
+    sum += lp;
+    n++;
+  };
   try {
-    for await (const piece of chatStream(gen, msgs, 900, ac.signal, opts.temperature)) {
+    for await (const piece of chatStream(gen, msgs, 900, ac.signal, opts.temperature, onLogprob)) {
       raw += piece;
       opts.onRaw?.(raw);
+      opts.onToken?.();
       st.push(piece);
       if (st.done) {
         ac.abort();
@@ -385,7 +415,7 @@ async function generateFor(
     opts.signal.removeEventListener('abort', onAbort);
   }
   st.end();
-  return { title: st.title, lines };
+  return { title: st.title, lines, confidence: n ? Math.exp(sum / n) : undefined };
 }
 
 /** Šedý text pro kód pod komentářem se zadáním. */
@@ -393,6 +423,12 @@ function instrGhost(lines: string[], ins: Instruction): { text: string; fromLine
   if (ins.indent.startsWith(ins.curBefore)) return { text: indentLines(lines, ins.indent), fromLineStart: true };
   return { text: [lines[0] ?? '', indentLines(lines.slice(1), ins.indent)].filter((x, i) => i === 0 || x).join('\n'), fromLineStart: false };
 }
+
+const shortLabel = (info: { kind: string; label: string; instruction?: string }) => {
+  if (info.kind === 'fn') return nameOf(info.label) || info.label.slice(0, 40);
+  const t = info.instruction || info.label;
+  return t.length > 48 ? t.slice(0, 47) + '…' : t;
+};
 
 // ---------- Tab návrhy ----------
 
@@ -402,6 +438,7 @@ class Completer implements vscode.InlineCompletionItemProvider {
   constructor(
     private c: Controller,
     private store: SpotStore,
+    private act: Activity,
   ) {}
 
   async provideInlineCompletionItems(
@@ -434,7 +471,7 @@ class Completer implements vscode.InlineCompletionItemProvider {
         const unit = indentUnit(doc);
         const ins = detectInstruction(text, offset, doc.languageId);
         const stub = ins ? undefined : detectStub(text, offset, doc.languageId, unit);
-        if (ins || stub) items = await this.smart(doc, pos, offset, unit, stub, ins, ac.signal);
+        if (ins || stub) items = await this.smart(doc, pos, offset, unit, stub, ins, ac);
       }
       if (!items) items = await this.fim(doc, pos, offset, ac.signal);
       if (!items || token.isCancellationRequested) return;
@@ -455,12 +492,17 @@ class Completer implements vscode.InlineCompletionItemProvider {
     const c = lineComment(doc.languageId);
     const header = `${c.open} ${path.basename(doc.fileName)} (${langName(doc.languageId, doc.fileName)})${c.close}\n`;
     const nIndent = indentOf(doc.lineAt(pos.line).text).length;
-    let text = await infill(this.c.tab!, header + before, after, extraContext(doc), nIndent, signal);
-    text = trimOverlap(text, after);
-    const lines = text.split('\n');
-    if (lines.length > 15) text = lines.slice(0, 15).join('\n');
-    if (!text.trim()) return;
-    return [new vscode.InlineCompletionItem(text, new vscode.Range(pos, pos))];
+    const job = this.act.start('tab', '');
+    try {
+      let text = await infill(this.c.tab!, header + before, after, extraContext(doc), nIndent, signal);
+      text = trimOverlap(text, after);
+      const lines = text.split('\n');
+      if (lines.length > 15) text = lines.slice(0, 15).join('\n');
+      if (!text.trim()) return;
+      return [new vscode.InlineCompletionItem(text, new vscode.Range(pos, pos))];
+    } finally {
+      this.act.end(job);
+    }
   }
 
   /** Celá funkce / kód podle komentáře velkým modelem. Pamatuje si všechna řešení pro dané místo. */
@@ -471,26 +513,28 @@ class Completer implements vscode.InlineCompletionItemProvider {
     unit: string,
     stub: Stub | undefined,
     ins: Instruction | undefined,
-    signal: AbortSignal,
+    ac: AbortController,
   ) {
     const loc = resolveAt(doc, offset, this.store, unit);
     if (!loc) return;
     let variants = this.store.ordered(loc.info.key);
     if (!variants.length) {
       const gen = await this.c.ensureGen();
+      const job = this.act.start(stub ? 'fn' : 'instr', shortLabel(loc.info), () => ac.abort());
       this.c.busy++;
       this.c.render();
       try {
-        const r = await generateFor(gen, doc, loc, { temperature: 0.1, signal });
-        if (signal.aborted) return;
-        await this.store.add(loc.info, { title: r.title, lines: r.lines, origin: 'ai' });
+        const r = await generateFor(gen, doc, loc, { temperature: 0.1, signal: ac.signal, onToken: () => this.act.tick(job) });
+        if (ac.signal.aborted) return;
+        await this.store.add(loc.info, { title: r.title, lines: r.lines, origin: 'ai', confidence: r.confidence });
       } finally {
+        this.act.end(job);
         this.c.busy--;
         this.c.render();
       }
       variants = this.store.ordered(loc.info.key);
     }
-    // Doporučené první; ostatní jde přepínat Alt+] / Alt+[.
+    // Nejlepší (nejvyšší jistota) první; ostatní jde přepínat Alt+] / Alt+[.
     return variants
       .filter((v) => v.lines.some((l) => l.trim()))
       .map((v) => {
@@ -503,9 +547,12 @@ class Completer implements vscode.InlineCompletionItemProvider {
 
 // ---------- Ctrl+Alt+Enter: dopsat funkci / kód (streamuje rovnou do souboru) ----------
 
-async function generateCommand(c: Controller, store: SpotStore): Promise<void> {
+async function generateCommand(c: Controller, store: SpotStore, act: Activity): Promise<void> {
   const ed = vscode.window.activeTextEditor;
-  if (!ed) return;
+  if (!ed) {
+    vscode.window.showInformationMessage('Octomilka: nejdřív klikni do souboru s kódem.');
+    return;
+  }
   const doc = ed.document;
   const unit = indentUnit(doc);
   let pos = ed.selection.active;
@@ -587,6 +634,7 @@ async function generateCommand(c: Controller, store: SpotStore): Promise<void> {
 
   const ac = new AbortController();
   const stopOnSwitch = vscode.window.onDidChangeActiveTextEditor(() => ac.abort());
+  const job = act.start('cmd', loc.info.key ? shortLabel(loc.info) : path.basename(doc.fileName), () => ac.abort());
   c.busy++;
   c.render();
   try {
@@ -595,9 +643,15 @@ async function generateCommand(c: Controller, store: SpotStore): Promise<void> {
       async (_p, token) => {
         token.onCancellationRequested(() => ac.abort());
         const msgsMode = freeMode ? { ...loc, mode: 'free' as const } : loc;
-        const r = await generateFor(gen, doc, msgsMode as Located, { temperature: 0.1, signal: ac.signal, onLine: write });
+        const r = await generateFor(gen, doc, msgsMode as Located, {
+          temperature: 0.1,
+          signal: ac.signal,
+          onLine: write,
+          onToken: () => act.tick(job),
+        });
         await chain;
-        if (!freeMode && loc.info.key && !ac.signal.aborted) await store.add(loc.info, { title: r.title, lines: r.lines, origin: 'ai' });
+        if (!freeMode && loc.info.key && !ac.signal.aborted)
+          await store.add(loc.info, { title: r.title, lines: r.lines, origin: 'ai', confidence: r.confidence });
       },
     );
   } catch (e) {
@@ -607,21 +661,53 @@ async function generateCommand(c: Controller, store: SpotStore): Promise<void> {
     }
   } finally {
     stopOnSwitch.dispose();
+    act.end(job);
     c.busy--;
     c.render();
   }
 }
 
-// ---------- Jiné řešení + panel s historií ----------
+// ---------- Jiné řešení (spodní panel) ----------
 
-class Solutions implements PanelHost {
+class Solutions implements ViewHost {
   private abort?: AbortController;
   private hints = new Map<string, number>();
 
   constructor(
     private c: Controller,
     readonly store: SpotStore,
+    private act: Activity,
+    private view: OctoView,
   ) {}
+
+  status() {
+    return {
+      engine: this.c.state,
+      progress: this.c.progress,
+      downloadSize: this.c.downloadSize,
+      profile: PROFILES[this.c.profile].label,
+      enabled: cfg().get('enabled', true),
+      tab: { phase: this.c.tab?.phase ?? 'stopped', device: this.c.tab?.device ?? '' },
+      gen: { phase: this.c.gen?.phase ?? 'stopped', device: this.c.gen?.device ?? '' },
+      jobs: this.act.list(),
+    };
+  }
+
+  resolveCursor(ed: vscode.TextEditor): Located | undefined {
+    const doc = ed.document;
+    if (doc.uri.scheme !== 'file' && doc.uri.scheme !== 'untitled') return undefined;
+    const loc = resolveAt(doc, doc.offsetAt(ed.selection.active), this.store, indentUnit(doc));
+    if (loc) this.hints.set(loc.info.key, loc.range[0]);
+    return loc;
+  }
+
+  async locateInfo(info: SpotInfo): Promise<Located | undefined> {
+    try {
+      return (await this.find(info)).loc;
+    } catch {
+      return undefined;
+    }
+  }
 
   private async docFor(info: SpotInfo): Promise<vscode.TextDocument> {
     return vscode.workspace.textDocuments.find((d) => d.uri.toString() === info.uri) ?? vscode.workspace.openTextDocument(vscode.Uri.parse(info.uri));
@@ -635,107 +721,122 @@ class Solutions implements PanelHost {
     return { doc, loc };
   }
 
-  /** Příkaz z editoru: najdi místo u kurzoru, otevři panel a vymysli jiné řešení. */
+  /** Příkaz z editoru: najdi místo u kurzoru, ukaž panel a (volitelně) vymysli jiné řešení. */
   async fromCursor(generate: boolean): Promise<void> {
     const ed = vscode.window.activeTextEditor;
+    await this.view.reveal();
     if (!ed) return;
-    const doc = ed.document;
-    const offset = doc.offsetAt(ed.selection.active);
-    const loc = resolveAt(doc, offset, this.store, indentUnit(doc));
+    const loc = this.resolveCursor(ed);
     if (!loc) {
-      vscode.window.showInformationMessage('Octomilka: dej kurzor do funkce, nebo na prázdný řádek pod komentář se zadáním.');
+      vscode.window.showInformationMessage('Octomilka: klikni do nějaké funkce, nebo na prázdný řádek pod komentář se zadáním.');
       return;
     }
-    this.hints.set(loc.info.key, loc.range[0]);
-    if (loc.current.length) await this.store.add(loc.info, { title: 'Tvůj kód', lines: loc.current, origin: 'user', best: false });
-    SolutionsPanel.show(this, loc.info);
+    if (loc.current.length) await this.store.add(loc.info, { title: 'Tvůj kód', lines: loc.current, origin: 'user' });
+    this.view.showSpot(loc);
     if (generate) await this.more(loc.info);
   }
 
   stop(): void {
     this.abort?.abort();
+    this.act.stopAll();
   }
 
-  /** Nevyužité nápady na jiné přístupy pro každé místo (jen v paměti této relace). */
-  private ideas = new Map<string, string[]>();
-
   async more(info: SpotInfo, approach?: string): Promise<void> {
-    const panel = SolutionsPanel.show(this, info);
+    const view = this.view;
     this.abort?.abort();
     const ac = new AbortController();
     this.abort = ac;
-    panel.error = undefined;
-    panel.stream = { title: '', text: '' };
-    panel.render();
+    view.error = undefined;
+    view.stream = { title: '', text: '' };
+    view.render();
+    const f = view.filtersFor(info.key);
+    const must = [...f.must];
+    const mustNot = [...f.mustNot];
     this.c.busy++;
     this.c.render();
+    let job = 0;
     try {
       const gen = await this.c.ensureGen();
       const { doc, loc } = await this.find(info);
+      if (loc.current.length) await this.store.add(info, { title: 'Tvůj kód', lines: loc.current, origin: 'user' });
       const known = this.store.ordered(info.key);
       const hasAi = known.some((v) => v.origin === 'ai');
       const avoid = hasAi ? known.map((v) => ({ title: v.title, code: v.lines.slice(0, 18).join('\n') })) : undefined;
 
       // Krok 1 (jen u jiného řešení): AI vyjmenuje jiné správné přístupy. Bez toho 7B model vymýšlí nesmysly.
       if (hasAi) {
-        let list = this.ideas.get(info.key) ?? [];
+        const fkey = `${must.join('|')}#${mustNot.join('|')}`;
+        let list = this.ideasCache.get(info.key + fkey) ?? [];
         if (approach) list = list.filter((x) => x !== approach);
         else {
           if (!list.length) {
-            panel.stream = { title: 'Vymýšlím jiné přístupy…', text: '' };
-            panel.render();
+            job = this.act.start('ideas', shortLabel(info), () => ac.abort());
+            view.stream = { title: 'Vymýšlím, jak to udělat jinak…', text: '' };
+            view.render();
             let raw = '';
-            const opts = { fileName: doc.fileName, langId: doc.languageId, before: loc.before, after: loc.after, mode: loc.mode, instruction: loc.info.instruction, avoid };
+            const opts = { fileName: doc.fileName, langId: doc.languageId, before: loc.before, after: loc.after, mode: loc.mode, instruction: loc.info.instruction, avoid, must, mustNot };
             for await (const p of chatStream(gen, buildIdeasMessages(opts), 200, ac.signal, 0.3)) {
               raw += p;
-              panel.stream = { title: 'Vymýšlím jiné přístupy…', text: raw };
-              panel.render();
+              this.act.tick(job);
+              view.stream = { title: 'Vymýšlím, jak to udělat jinak…', text: raw };
+              view.render();
             }
+            this.act.end(job);
+            job = 0;
             const used = new Set(known.map((v) => v.title.toLowerCase()));
             list = parseIdeas(raw).filter((x) => !used.has(x.split(':')[0].trim().toLowerCase()));
           }
           approach = list.shift();
         }
-        this.ideas.set(info.key, list);
-        panel.ideas = list;
+        this.ideasCache.set(info.key + fkey, list);
+        view.setIdeas(info.key, list);
       }
 
+      job = this.act.start(hasAi ? 'alt' : 'fn', shortLabel(info), () => ac.abort());
       let last = 0;
       const r = await generateFor(gen, doc, loc, {
         temperature: hasAi ? 0.3 : 0.1, // první = nejpravděpodobnější, další podle zvoleného přístupu
         avoid,
         approach,
+        must,
+        mustNot,
         signal: ac.signal,
+        onToken: () => this.act.tick(job),
         onRaw: (raw) => {
           const now = Date.now();
           if (now - last < 120) return;
           last = now;
           const m = /APPROACH\**\s*:\s*(.*)/i.exec(raw);
           const title = m ? m[1].split('\n')[0].trim() : approach?.split(':')[0] ?? '';
-          panel.stream = { title, text: raw.replace(/^.*APPROACH.*\n?/im, '') };
-          panel.render();
+          view.stream = { title, text: raw.replace(/^.*APPROACH.*\n?/im, '') };
+          view.render();
         },
       });
       if (ac.signal.aborted) return;
       const before = this.store.ordered(info.key).length;
-      const v = await this.store.add(info, { title: r.title, lines: r.lines, origin: 'ai' });
-      panel.stream = undefined;
-      if (!v) throw new Error('AI nevrátila žádný kód.');
-      if (this.store.ordered(info.key).length === before) panel.error = 'AI zopakovala už známé řešení – zkus to znovu.';
+      const v = await this.store.add(info, { title: r.title, lines: r.lines, origin: 'ai', confidence: r.confidence });
+      view.stream = undefined;
+      if (!v) throw new Error('AI nevrátila žádný kód. Zkus to znovu.');
+      if (this.store.ordered(info.key).length === before) view.error = 'AI zopakovala už známé řešení – zkus to znovu.';
+      view.select(info.key, v.id);
       await this.apply(info, v.id);
     } catch (e) {
       if (!ac.signal.aborted) {
-        panel.error = (e as Error).message;
+        view.error = (e as Error).message;
         log(`jiné řešení: ${(e as Error).message}`);
       }
     } finally {
+      if (job) this.act.end(job);
       if (this.abort === ac) this.abort = undefined;
-      panel.stream = undefined;
-      panel.render();
+      view.stream = undefined;
+      view.render();
       this.c.busy--;
       this.c.render();
     }
   }
+
+  /** Nevyužité nápady na jiné přístupy (klíč = místo + filtr), jen v paměti této relace. */
+  private ideasCache = new Map<string, string[]>();
 
   async apply(info: SpotInfo, id: string): Promise<void> {
     const v = this.store.get(info.key)?.variants.find((x) => x.id === id);
@@ -745,20 +846,14 @@ class Solutions implements PanelHost {
       const edit = new vscode.WorkspaceEdit();
       edit.replace(doc.uri, new vscode.Range(doc.positionAt(loc.range[0]), doc.positionAt(loc.range[1])), loc.replacement(v.lines));
       await vscode.workspace.applyEdit(edit);
-      const p = SolutionsPanel.current;
-      if (p) {
-        p.appliedId = id;
-        p.error = undefined;
-        p.render();
-      }
+      this.view.error = undefined;
       const ed = vscode.window.visibleTextEditors.find((e) => e.document === doc);
       ed?.revealRange(new vscode.Range(doc.positionAt(loc.range[0]), doc.positionAt(loc.range[0])), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+      const again = locate(doc, info, loc.range[0], this.store, indentUnit(doc));
+      if (again) this.view.showSpot(again);
     } catch (e) {
-      const p = SolutionsPanel.current;
-      if (p) {
-        p.error = (e as Error).message;
-        p.render();
-      }
+      this.view.error = (e as Error).message;
+      this.view.render();
     }
   }
 }
@@ -858,22 +953,44 @@ class Updater {
 export function activate(ctx: vscode.ExtensionContext): void {
   out = vscode.window.createOutputChannel('Octomilka');
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-  status.command = 'octomilka.menu';
+  status.command = 'octomilka.showPanel';
   const c = new Controller(ctx, status);
   const store = new SpotStore(ctx.workspaceState);
-  const sol = new Solutions(c, store);
+  const act = new Activity();
+  const view = new OctoView(ctx);
+  const sol = new Solutions(c, store, act, view);
+  view.bind(sol);
   const upd = new Updater(ctx);
+
+  const pickProfile = async () => {
+    const opts = [
+      { id: 'auto', label: 'Automaticky (doporučeno)', description: `podle RAM → ${PROFILES[autoProfile()].label}` },
+      ...(['small', 'medium', 'large'] as Profile[]).map((p) => ({
+        id: p,
+        label: PROFILES[p].label,
+        description: `${PROFILES[p].tab.label} + ${PROFILES[p].gen.label}`,
+      })),
+    ];
+    const pp = await vscode.window.showQuickPick(opts, { title: 'Jak velkou AI používat? Větší = chytřejší, ale pomalejší a víc RAM.' });
+    if (pp) await cfg().update('profile', pp.id, vscode.ConfigurationTarget.Global);
+  };
 
   ctx.subscriptions.push(
     out,
     status,
     { dispose: () => c.dispose() },
     { dispose: () => upd.dispose() },
-    vscode.commands.registerCommand('octomilka.checkUpdates', () => upd.check(true)),
-    vscode.languages.registerInlineCompletionItemProvider({ pattern: '**' }, new Completer(c, store)),
-    vscode.commands.registerCommand('octomilka.generate', () => generateCommand(c, store)),
+    vscode.window.registerWebviewViewProvider(OctoView.id, view, { webviewOptions: { retainContextWhenHidden: true } }),
+    c.changed.event(() => view.render()),
+    act.onChange(() => view.render()),
+    vscode.languages.registerInlineCompletionItemProvider({ pattern: '**' }, new Completer(c, store, act)),
+    vscode.commands.registerCommand('octomilka.generate', () => generateCommand(c, store, act)),
     vscode.commands.registerCommand('octomilka.alternative', () => sol.fromCursor(true)),
     vscode.commands.registerCommand('octomilka.solutions', () => sol.fromCursor(false)),
+    vscode.commands.registerCommand('octomilka.showPanel', () => view.reveal()),
+    vscode.commands.registerCommand('octomilka.stop', () => sol.stop()),
+    vscode.commands.registerCommand('octomilka.profile', pickProfile),
+    vscode.commands.registerCommand('octomilka.checkUpdates', () => upd.check(true)),
     vscode.commands.registerCommand('octomilka.toggle', async () => {
       const v = !cfg().get('enabled', true);
       await cfg().update('enabled', v, vscode.ConfigurationTarget.Global);
@@ -886,40 +1003,34 @@ export function activate(ctx: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('octomilka.log', () => out.show()),
     vscode.commands.registerCommand('octomilka.menu', async () => {
       const en = cfg().get('enabled', true);
-      const items: (vscode.QuickPickItem & { id: string })[] = [];
+      const items: (vscode.QuickPickItem & { id: string })[] = [
+        { id: 'panel', label: '$(layout-panel) Otevřít panel Octomilka' },
+      ];
       if (c.state === 'needsSetup' || c.state === 'error' || c.state === 'off')
         items.push({ id: 'setup', label: '$(cloud-download) Nainstalovat / spustit AI' });
       items.push(
         { id: 'toggle', label: en ? '$(circle-slash) Vypnout Tab návrhy' : '$(sparkle) Zapnout Tab návrhy' },
         { id: 'gen', label: '$(wand) Dopsat funkci / kód u kurzoru', description: 'Ctrl+Alt+Enter' },
         { id: 'alt', label: '$(versions) Jiné řešení', description: 'Alt+Shift+Enter' },
-        { id: 'sol', label: '$(history) Historie řešení u kurzoru' },
-        { id: 'profile', label: '$(server) Velikost modelů…', description: PROFILES[c.profile].label },
+        { id: 'profile', label: '$(server) Velikost AI…', description: PROFILES[c.profile].label },
         { id: 'redl', label: '$(refresh) Restartovat / stáhnout znovu' },
         { id: 'upd', label: '$(sync) Zkontrolovat aktualizace', description: `verze ${upd.current}` },
         { id: 'log', label: '$(output) Log' },
       );
       const pick = await vscode.window.showQuickPick(items, { title: 'Octomilka – lokální AI' });
       if (!pick) return;
-      if (pick.id === 'setup' || pick.id === 'redl') vscode.commands.executeCommand('octomilka.setup');
-      if (pick.id === 'toggle') vscode.commands.executeCommand('octomilka.toggle');
-      if (pick.id === 'gen') vscode.commands.executeCommand('octomilka.generate');
-      if (pick.id === 'alt') vscode.commands.executeCommand('octomilka.alternative');
-      if (pick.id === 'sol') vscode.commands.executeCommand('octomilka.solutions');
-      if (pick.id === 'log') out.show();
-      if (pick.id === 'upd') void upd.check(true);
-      if (pick.id === 'profile') {
-        const opts = [
-          { id: 'auto', label: 'Automaticky', description: `podle RAM → ${PROFILES[autoProfile()].label}` },
-          ...(['small', 'medium', 'large'] as Profile[]).map((p) => ({
-            id: p,
-            label: PROFILES[p].label,
-            description: `${PROFILES[p].tab.label} + ${PROFILES[p].gen.label}`,
-          })),
-        ];
-        const pp = await vscode.window.showQuickPick(opts, { title: 'Velikost modelů' });
-        if (pp) await cfg().update('profile', pp.id, vscode.ConfigurationTarget.Global);
-      }
+      const run: Record<string, string> = {
+        panel: 'octomilka.showPanel',
+        setup: 'octomilka.setup',
+        redl: 'octomilka.setup',
+        toggle: 'octomilka.toggle',
+        gen: 'octomilka.generate',
+        alt: 'octomilka.alternative',
+        profile: 'octomilka.profile',
+        upd: 'octomilka.checkUpdates',
+        log: 'octomilka.log',
+      };
+      void vscode.commands.executeCommand(run[pick.id]);
     }),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('octomilka.profile') || e.affectsConfiguration('octomilka.gpu')) {
@@ -931,6 +1042,11 @@ export function activate(ctx: vscode.ExtensionContext): void {
   c.render();
   void c.init(false);
   upd.start();
+  // Poprvé po instalaci ukázat panel s návodem.
+  if (!ctx.globalState.get('panelShown')) {
+    void ctx.globalState.update('panelShown', true);
+    setTimeout(() => void view.reveal(), 1500);
+  }
 }
 
 export function deactivate(): void {}

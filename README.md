@@ -8,16 +8,28 @@ Zdarma, bez účtu, bez cloudu. Po prvním stažení funguje i úplně offline.
 - **Ctrl+Alt+Enter:** dopíše funkci (nebo kód podle komentáře nad kurzorem) rovnou do souboru a uvidíš, jak píše.
 - **Zadání komentářem:** napiš třeba `// make a function that uses .map()` (klidně česky), dej Enter a AI navrhne kód podle zadání.
 - **Jiné řešení (Alt+Shift+Enter):** AI vymyslí jiný přístup ke stejné funkci nebo zadání a vloží ho do kódu.
-  Vedle se otevře panel s historií všech řešení. ⭐ = co AI považuje za nejpravděpodobnější, ostatní jsou jiné přístupy.
-  Kliknutím na „Použít“ přepínáš mezi řešeními a pod kartami jsou další nápady AI jako tlačítka.
   AI si řešení pamatuje (lokálně, pro každý projekt zvlášť), takže je neopakuje. Šedé návrhy jde přepínat i přes Alt+] / Alt+[.
 - **Správný jazyk:** model dostane název souboru a jazyk, takže v `.ts` píše TypeScript, v `.py` Python a tak dál.
+
+### Panel Octomilka (dole vedle Terminálu)
+
+Otevře se kliknutím na Octomilku ve stavové liště, nebo sám při prvním spuštění.
+
+- **Živý stav:** pořád vidíš, co AI dělá. Třeba „Přemýšlí: Píše celou funkci · isPrime · 12 s · 85 tokenů“ s tlačítkem Zastavit.
+  Nebo „Připraveno“, „Stahuju AI… 42 %“. Je tam i jestli rychlá a chytrá AI běží na grafice nebo procesoru.
+- **Řešení seřazená od nejlepšího:** klikneš do funkce a panel ukáže všechna řešení, která pro ni AI vymyslela.
+  Řadí se podle **jistoty AI** (průměrná pravděpodobnost každého kousku kódu podle modelu). ⭐ = nejvyšší jistota.
+  Jistota není záruka správnosti, je to jen to, jak moc si byl model jistý.
+- **Filtr:** napiš slovo a dej „Musí obsahovat“ (Enter) nebo „Nesmí obsahovat“. Filtr schová řešení, která neodpovídají.
+  A když klikneš na „Vymyslet řešení podle filtru“, AI ho dodrží (třeba musí `map`, nesmí `for`).
+- **Náhled a přepínání:** klik na řešení = ukázat kód, „Použít tohle řešení“ (nebo dvojklik) = vložit do kódu.
+- **Zkratky** jsou vypsané přímo v panelu. Kdo neví, co dělat, uvidí krok za krokem „Jak na to“.
 
 ## Instalace (pro spolužáky)
 
 1. Stáhni `octomilka-x.y.z.vsix` z [Releases](https://github.com/LukasVitek67/octomilka/releases/latest).
 2. Ve VS Code otevři Extensions (Ctrl+Shift+X), klikni na `…` vpravo nahoře a vyber **Install from VSIX…**.
-   Nebo v terminálu: `code --install-extension octomilka-0.3.0.vsix`
+   Nebo v terminálu: `code --install-extension octomilka-0.4.0.vsix`
 3. Vpravo dole vyskočí „Stáhnout“. Jednorázově se stáhne engine a modely podle toho, kolik máš RAM.
 4. Hotovo. Ve stavové liště vpravo dole uvidíš ✨ Octomilka.
 
@@ -82,7 +94,8 @@ Ve VS Code otevři složku a stiskni F5. Spustí se nové okno s extension.
 | `src/engine.ts` | stahování, spouštění `llama-server`, volání AI, prompty, seznam modelů a profilů |
 | `src/stub.ts` | pozná prázdnou funkci / komentář se zadáním u kurzoru a vyčistí výstup modelu (bez vscode, testovatelné) |
 | `src/spots.ts` | místa v kódu (funkce, zadání) a lokální paměť všech navržených řešení |
-| `src/panel.ts`, `src/panelHtml.ts` | panel s historií řešení |
+| `src/view.ts`, `src/viewHtml.ts` | spodní panel: živý stav, zkratky, řešení podle jistoty, filtr |
+| `src/activity.ts` | co AI právě dělá (pro živý stav a tlačítko Zastavit) |
 | `src/updater.ts` | automatické aktualizace z GitHub Releases (ověření SHA256) |
 
 Další model přidáš do `M` a `PROFILES` v `src/engine.ts`.

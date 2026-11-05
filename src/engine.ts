@@ -182,9 +182,15 @@ export class LlamaServer {
   get running(): boolean {
     return !!this.proc;
   }
+  /** Pro zobrazení v UI. */
+  get phase(): 'stopped' | 'starting' | 'running' {
+    if (!this.ready) return 'stopped';
+    return this.device ? 'running' : 'starting';
+  }
 
   start(): Promise<void> {
     if (this.ready) return this.ready;
+    this.device = '';
     const ready = this.boot();
     this.ready = ready;
     ready.catch(() => {
@@ -263,6 +269,7 @@ export class LlamaServer {
     const p = this.proc;
     this.proc = undefined;
     this.ready = undefined;
+    this.device = '';
     if (p && p.exitCode === null) p.kill();
   }
 }
@@ -319,13 +326,23 @@ export async function* chatStream(
   maxTokens: number,
   signal: AbortSignal,
   temperature = 0.1,
+  /** Pravděpodobnost každého tokenu (ln p, z nezměněného rozdělení modelu) – pro "jistotu AI". */
+  onLogprob?: (logprob: number, token: string) => void,
 ): AsyncGenerator<string> {
   s.lastUsed = Date.now();
   const r = await fetch(s.url + '/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     signal,
-    body: JSON.stringify({ messages, max_tokens: maxTokens, temperature, top_p: 0.95, stream: true, cache_prompt: true }),
+    body: JSON.stringify({
+      messages,
+      max_tokens: maxTokens,
+      temperature,
+      top_p: 0.95,
+      stream: true,
+      cache_prompt: true,
+      ...(onLogprob ? { logprobs: true, top_logprobs: 1 } : {}),
+    }),
   });
   if (!r.ok || !r.body) throw new Error(`chat HTTP ${r.status}: ${(await r.text()).slice(0, 300)}`);
   const reader = r.body.getReader();
@@ -343,7 +360,10 @@ export async function* chatStream(
       const data = line.slice(5).trim();
       if (data === '[DONE]') return;
       try {
-        const piece = JSON.parse(data).choices?.[0]?.delta?.content;
+        const ch = JSON.parse(data).choices?.[0];
+        const piece = ch?.delta?.content;
+        if (onLogprob && Array.isArray(ch?.logprobs?.content))
+          for (const t of ch.logprobs.content) if (typeof t.logprob === 'number') onLogprob(t.logprob, String(t.token ?? ''));
         if (piece) {
           s.lastUsed = Date.now();
           yield piece;
@@ -413,6 +433,16 @@ export interface PromptOpts {
   avoid?: { title: string; code: string }[];
   /** Konkrétní přístup, kterým se má řešení napsat (z kroku "nápady"). */
   approach?: string;
+  /** Požadavky uživatele z finderu: kód musí / nesmí obsahovat. */
+  must?: string[];
+  mustNot?: string[];
+}
+
+function requirements(o: PromptOpts): string {
+  const parts: string[] = [];
+  if (o.must?.length) parts.push(`The code MUST contain / use: ${o.must.map((x) => `"${x}"`).join(', ')}.`);
+  if (o.mustNot?.length) parts.push(`The code MUST NOT contain / use: ${o.mustNot.map((x) => `"${x}"`).join(', ')}.`);
+  return parts.length ? `\n\nRequirements from the developer (follow them strictly): ${parts.join(' ')}` : '';
 }
 
 /** Krok 1 u "jiného řešení": AI jen vyjmenuje jiné správné přístupy (krátké, rychlé). */
@@ -436,7 +466,7 @@ export function buildIdeasMessages(o: PromptOpts): ChatMsg[] {
     },
     {
       role: 'user',
-      content: `File: ${path.basename(o.fileName)} (${lang})\n\n${o.before}<FILL_HERE>${o.after}\n\nAlready proposed:\n\n${known || '(none)'}`,
+      content: `File: ${path.basename(o.fileName)} (${lang})\n\n${o.before}<FILL_HERE>${o.after}\n\nAlready proposed:\n\n${known || '(none)'}${requirements(o)}`,
     },
   ];
 }
@@ -476,6 +506,7 @@ export function buildMessages(o: PromptOpts): ChatMsg[] {
     `no markdown fences, no explanation.`;
   let user = `File: ${path.basename(o.fileName)} (${lang})\n\n${o.before}<FILL_HERE>${o.after}`;
   if (o.approach) user += `\n\nImplement it using exactly this approach: ${o.approach}`;
+  user += requirements(o);
   if (o.avoid?.length)
     user +=
       `\n\nThese approaches were ALREADY proposed for <FILL_HERE>. Do NOT repeat any of them. Write a genuinely ` +

@@ -17,9 +17,29 @@ export interface Variant {
   id: string;
   title: string;
   lines: string[];
-  best: boolean; // první, nejpravděpodobnější návrh AI (generovaný s teplotou ~0)
+  best: boolean; // AI ho považuje za nejpravděpodobnější (nejvyšší jistota)
   origin: 'ai' | 'user';
   at: number;
+  /** Jistota AI 0–1 = průměrná pravděpodobnost tokenů kódu (geometrický průměr). */
+  confidence?: number;
+}
+
+/** Odpovídá kód filtru "musí obsahovat" / "nesmí obsahovat"? (bez ohledu na velikost písmen) */
+export function matchesFilter(lines: string[], must: string[], mustNot: string[]): boolean {
+  const code = lines.join('\n').toLowerCase();
+  return must.every((m) => code.includes(m.toLowerCase())) && !mustNot.some((m) => code.includes(m.toLowerCase()));
+}
+
+/** Pořadí: AI řešení podle jistoty (nejvyšší první), staré bez jistoty za nimi, tvůj kód na konci. */
+export function rankVariants(vs: Variant[]): Variant[] {
+  const score = (v: Variant) => (v.origin === 'user' ? -2 : v.confidence ?? (v.best ? -0.5 : -1));
+  return [...vs].sort((a, b) => score(b) - score(a) || a.at - b.at);
+}
+
+function markBest(vs: Variant[]): void {
+  vs.forEach((x) => (x.best = false));
+  const top = rankVariants(vs).find((v) => v.origin === 'ai');
+  if (top) top.best = true;
 }
 
 export interface SpotInfo {
@@ -70,26 +90,37 @@ export class SpotStore {
   }
 
   /** Přidá řešení (duplicitní kód se neukládá). Vrací uložené řešení. */
-  async add(info: SpotInfo, v: { title: string; lines: string[]; origin: 'ai' | 'user'; best?: boolean }): Promise<Variant | undefined> {
+  async add(
+    info: SpotInfo,
+    v: { title: string; lines: string[]; origin: 'ai' | 'user'; confidence?: number },
+  ): Promise<Variant | undefined> {
     if (!v.lines.some((l) => l.trim())) return undefined;
     const s: SpotData = this.get(info.key) ?? { ...info, variants: [], updated: 0 };
     const dup = s.variants.find((x) => sameCode(x.lines, v.lines));
-    if (dup) return dup;
-    const best = v.best ?? (v.origin === 'ai' && !s.variants.some((x) => x.best));
-    if (best) s.variants.forEach((x) => (x.best = false));
+    if (dup) {
+      // stejný kód od AI: doplnit jistotu a pojmenování, když chyběly
+      if (v.origin === 'ai' && dup.origin === 'user') dup.origin = 'ai';
+      if (v.confidence !== undefined && dup.confidence === undefined) dup.confidence = v.confidence;
+      if (v.title && (dup.title === 'Tvůj kód' || !dup.title) && v.origin === 'ai') dup.title = v.title;
+      markBest(s.variants);
+      await this.put({ ...info, variants: s.variants, updated: 0 });
+      return dup;
+    }
     const item: Variant = {
       id: Math.random().toString(36).slice(2, 10),
       title: v.title || (v.origin === 'user' ? 'Tvůj kód' : 'Řešení'),
       lines: v.lines,
-      best,
+      best: false,
       origin: v.origin,
       at: Date.now(),
+      confidence: v.confidence,
     };
     s.variants.push(item);
     while (s.variants.length > MAX_VARIANTS) {
-      const i = s.variants.findIndex((x) => !x.best);
-      s.variants.splice(i < 0 ? 0 : i, 1);
+      const worst = rankVariants(s.variants).filter((x) => x.origin === 'ai').pop();
+      s.variants.splice(Math.max(0, s.variants.indexOf(worst ?? s.variants[0])), 1);
     }
+    markBest(s.variants);
     await this.put({ ...info, variants: s.variants, updated: 0 });
     return item;
   }
@@ -98,14 +129,14 @@ export class SpotStore {
     const s = this.get(key);
     if (!s) return;
     s.variants = s.variants.filter((x) => x.id !== id);
+    markBest(s.variants);
     await this.put(s);
   }
 
-  /** Seřazeno: doporučené první, pak podle času. */
+  /** Seřazeno od nejpravděpodobnější (nejvyšší jistota AI) po nejhorší. */
   ordered(key: string): Variant[] {
     const s = this.get(key);
-    if (!s) return [];
-    return [...s.variants].sort((a, b) => Number(b.best) - Number(a.best) || a.at - b.at);
+    return s ? rankVariants(s.variants) : [];
   }
 }
 

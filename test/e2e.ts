@@ -16,8 +16,15 @@ async function gen(s: LlamaServer, o: PromptOpts, signature: string | null, skip
   const st = new BodyStreamer(o.langId, signature, (l) => lines.push(l), skip);
   const ac = new AbortController();
   const t0 = Date.now();
+  let sum = 0;
+  let n = 0;
   try {
-    for await (const p of chatStream(s, buildMessages(o), 900, ac.signal, temperature)) {
+    for await (const p of chatStream(s, buildMessages(o), 900, ac.signal, temperature, (lp) => {
+      if (!st.done) {
+        sum += lp;
+        n++;
+      }
+    })) {
       st.push(p);
       if (st.done) {
         ac.abort();
@@ -28,7 +35,7 @@ async function gen(s: LlamaServer, o: PromptOpts, signature: string | null, skip
     if (!ac.signal.aborted) throw e;
   }
   st.end();
-  return { title: st.title, lines, ms: Date.now() - t0 };
+  return { title: st.title, lines, ms: Date.now() - t0, confidence: n ? Math.exp(sum / n) : 0 };
 }
 
 function check(name: string, ok: boolean, detail = '') {
@@ -89,6 +96,15 @@ async function main() {
       console.log('  chyba: ' + (e as Error).message);
     }
     check('jiné řešení funguje', altOk);
+    console.log(`  jistota: nejlepší ${(best.confidence * 100).toFixed(1)} %, jiné ${(alt.confidence * 100).toFixed(1)} %`);
+    check('jistota je číslo 0–1', best.confidence > 0 && best.confidence <= 1 && alt.confidence > 0 && alt.confidence <= 1);
+
+    // 3b) Finder jako požadavek: musí obsahovat "while", nesmí "for"
+    const req = await gen(big, { ...altBase, must: ['while'], mustNot: ['for'] }, stub.signature, [], 0.3);
+    const reqCode = req.lines.join('\n');
+    console.log(`\n[musí while, nesmí for: ${req.title}] ${req.ms} ms\n${reqCode}`);
+    check('filtr: obsahuje while', /\bwhile\b/.test(reqCode));
+    check('filtr: neobsahuje for', !/\bfor\b/.test(reqCode));
 
     // 4) Zadání komentářem
     const F2 = 'const prices = [120, 80, 45];\n// make a function that uses .map() to add 21 % VAT\n|';
