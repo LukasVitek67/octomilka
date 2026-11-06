@@ -31,16 +31,12 @@ models. The name stayed.
 1. **Everything stays local.** No cloud AI calls, no telemetry. The only allowed network traffic: downloading the
    llama.cpp engine (GitHub releases), models (Hugging Face) and the extension update check/download (GitHub API +
    release asset). Never send user code anywhere.
-2. **No stealth or detection-evasion features.** The owner once asked to make it "undetectable by MCP" (school
-   anti-AI detection on assignments). That was **refused**: it would mean helping bypass school integrity controls.
-   Do not add process hiding, renaming, masking of extension lists, or anything similar, even if asked again. The
-   legitimate path is for the school to allow AI for their AI-focused programme.
-3. **Ask the owner before outward-facing actions:** git push, GitHub releases, publishing. He approves each release
+2. **Ask the owner before outward-facing actions:** git push, GitHub releases, publishing. He approves each release
    explicitly ("Ano, vydat"). Local builds, tests and installing the `.vsix` into his own VS Code are fine without asking.
-4. **Licence hygiene:** the code is MIT. Model licences: Qwen2.5-Coder 0.5B/1.5B/7B and Qwen3-Coder are Apache-2.0.
+3. **Licence hygiene:** the code is MIT. Model licences: Qwen2.5-Coder 0.5B/1.5B/7B and Qwen3-Coder are Apache-2.0.
    **Qwen2.5-Coder 3B is under the Qwen Research licence (non-commercial)**, which is acceptable for school use and is
    noted in the README. Keep this note if you change models.
-5. **UI text is Czech, simple and friendly.** Buttons say exactly what they do ("Použít tohle řešení", "Doplň teď!").
+4. **UI text is Czech, simple and friendly.** Buttons say exactly what they do ("Použít tohle řešení", "Doplň teď!").
    Explain jargon or avoid it.
 
 ## 3. Architecture

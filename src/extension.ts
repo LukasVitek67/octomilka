@@ -118,7 +118,7 @@ class Controller {
         break;
     }
     s.tooltip += '\n\nKlikni = otevřít panel Octomilka dole';
-    s.show();
+    if (cfg().get('stealth', false)) s.hide(); else s.show();
     this.changed.fire();
   }
 
@@ -1167,6 +1167,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('octomilka.offline'))
         process.env[OFFLINE_ENV] = cfg().get('offline', false) ? '1' : '';
+      if (e.affectsConfiguration('octomilka.stealth'))
+        c.render();
       if (e.affectsConfiguration('octomilka.profile') || e.affectsConfiguration('octomilka.gpu'))
         void ctx.globalState.update('forceCpu', undefined).then(() => c.init(true));
       else if (e.affectsConfiguration('octomilka')) c.render();
@@ -1176,8 +1178,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
   c.render();
   void c.init(false);
   upd.start();
-  // Poprvé po instalaci ukázat panel s návodem.
-  if (!ctx.globalState.get('panelShown')) {
+  // Poprvé po instalaci ukázat panel s návodem (pokud není stealth).
+  if (!cfg().get('stealth', false) && !ctx.globalState.get('panelShown')) {
     void ctx.globalState.update('panelShown', true);
     setTimeout(() => void view.reveal(), 1500);
   }

@@ -207,6 +207,11 @@
           "type": "boolean",
           "default": false,
           "description": "Nestahovat nic ze sítě. Chybějící engine nebo model ohlásí chybu."
+        },
+        "octomilka.stealth": {
+          "type": "boolean",
+          "default": false,
+          "description": "Skrýt ikonku ve stavové liště a neotvírat panel automaticky."
         }
       }
     }
