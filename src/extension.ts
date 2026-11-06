@@ -3,6 +3,7 @@ import * as fsp from 'fs/promises';
 import * as path from 'path';
 import {
   LLAMA_TAG,
+  OFFLINE_ENV,
   PROFILES,
   Profile,
   Variant,
@@ -109,7 +110,7 @@ class Controller {
         s.tooltip = 'Chyba – klikni pro menu / log';
         break;
       case 'ready':
-        s.text = this.busy ? '$(sync~spin) Octomilka píše…' : en ? '$(sparkle) Octomilka' : '$(circle-slash) Octomilka';
+        s.text = this.busy ? '$(sync~spin)' : en ? '$(sparkle)' : '$(circle-slash)';
         s.tooltip =
           `${base}\n${en ? 'Tab návrhy zapnuté' : 'Tab návrhy vypnuté'}\n` +
           `Tab: ${this.tab?.device || '…'} · funkce: ${this.gen?.running ? this.gen.device : 'spustí se při použití'}\n` +
@@ -329,6 +330,65 @@ function extraContext(doc: vscode.TextDocument): ExtraChunk[] {
   return chunks;
 }
 
+// Cache souborů workspace pro danou kombinaci složky + přípony.
+const wsFileCache = new Map<string, { files: string[]; at: number }>();
+
+/** Vrátí ExtraChunk[] z viditelných editorů + souborů workspace se stejnou příponou. */
+async function workspaceContext(doc: vscode.TextDocument): Promise<ExtraChunk[]> {
+  const chunks = extraContext(doc); // začni s viditelnými editory
+  const folder = vscode.workspace.getWorkspaceFolder(doc.uri);
+  if (!folder) return chunks;
+  const ext = path.extname(doc.fileName);
+  if (!ext) return chunks;
+
+  const cacheKey = `${folder.uri.fsPath}:${ext}`;
+  const now = Date.now();
+  let cached = wsFileCache.get(cacheKey);
+  if (!cached || now - cached.at > 30_000) {
+    const pattern = new vscode.RelativePattern(folder, `**/*${ext}`);
+    const exclude = '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/out-test/**,**/.claude/**}';
+    try {
+      const uris = await Promise.race<vscode.Uri[]>([
+        vscode.workspace.findFiles(pattern, exclude, 100),
+        new Promise<vscode.Uri[]>((r) => setTimeout(() => r([]), 500)),
+      ]);
+      cached = { files: uris.map((u) => u.fsPath), at: now };
+    } catch {
+      cached = { files: [], at: now };
+    }
+    wsFileCache.set(cacheKey, cached);
+  }
+
+  const existing = new Set([...vscode.window.visibleTextEditors.map((e) => e.document.uri.fsPath), doc.uri.fsPath]);
+  const docDir = path.dirname(doc.uri.fsPath);
+  const candidates = cached.files
+    .filter((f) => !existing.has(f))
+    .sort((a, b) => (path.dirname(a) === docDir ? -1 : path.dirname(b) === docDir ? 1 : a.localeCompare(b)));
+
+  for (const f of candidates) {
+    if (chunks.length >= 6) break;
+    try {
+      const stat = await fsp.stat(f);
+      if (stat.size > 50_000) continue;
+      const content = await fsp.readFile(f, 'utf8');
+      if (content.trim().length > 80)
+        chunks.push({ filename: path.relative(folder.uri.fsPath, f), text: content.slice(0, 5000) });
+    } catch {}
+  }
+  return chunks;
+}
+
+// Jazyky, kde {} jsou selektory/bloky, NE těla funkcí – nespouštět smart() pro stub.
+const CSS_LANGS = new Set(['css', 'scss', 'less', 'stylus', 'sass']);
+// Vzory JS/TS kódu, které nesmí být v návrhu pro CSS soubory.
+const JS_IN_CSS = /\bfunction\s*\(|\b(?:const|let|var)\s+\w|=>\s*\{|import\s+\{|export\s+(default|const|function)/;
+
+/** Vrátí false, pokud návrh evidentně neodpovídá jazyku souboru. */
+function syntaxPlausible(text: string, langId: string): boolean {
+  if (CSS_LANGS.has(langId) && JS_IN_CSS.test(text)) return false;
+  return true;
+}
+
 function windowAround(doc: vscode.TextDocument, offset: number, beforeChars: number, afterChars: number) {
   const text = doc.getText();
   let b = Math.max(0, offset - beforeChars);
@@ -482,10 +542,11 @@ class Completer implements vscode.InlineCompletionItemProvider {
         const text = doc.getText();
         const unit = indentUnit(doc);
         const ins = detectInstruction(text, offset, doc.languageId);
-        const stub = ins ? undefined : detectStub(text, offset, doc.languageId, unit);
+        // V CSS/SCSS/LESS {} jsou selektory, ne těla funkcí – smart() by volalo JS model.
+        const stub = ins || CSS_LANGS.has(doc.languageId) ? undefined : detectStub(text, offset, doc.languageId, unit);
         if (ins || stub) items = await this.smart(doc, pos, offset, unit, stub, ins, ac);
       }
-      if (!items) items = await this.fim(doc, pos, offset, ac.signal);
+      if (!items) items = await this.fim(doc, pos, offset, ac);
       // Na povel a malá AI nic nevymyslela → zkusí to velká.
       if (!items && pushed && !token.isCancellationRequested) items = await this.bigFree(doc, pos, offset, ac);
       if (!items && pushed) vscode.window.setStatusBarMessage('Octomilka: tady mě nic nenapadlo', 3000);
@@ -501,19 +562,20 @@ class Completer implements vscode.InlineCompletionItemProvider {
     }
   }
 
-  private async fim(doc: vscode.TextDocument, pos: vscode.Position, offset: number, signal: AbortSignal) {
+  private async fim(doc: vscode.TextDocument, pos: vscode.Position, offset: number, ac: AbortController) {
     const { before, after } = windowAround(doc, offset, 6000, 2000);
     // Název souboru a jazyk na začátek, jinak malý model u krátkého souboru hádá jazyk.
     const c = lineComment(doc.languageId);
     const header = `${c.open} ${path.basename(doc.fileName)} (${langName(doc.languageId, doc.fileName)})${c.close}\n`;
     const nIndent = indentOf(doc.lineAt(pos.line).text).length;
+    const extra = await workspaceContext(doc);
     const job = this.act.start('tab', '');
     try {
-      let text = await infill(this.c.tab!, header + before, after, extraContext(doc), nIndent, signal);
+      let text = await infill(this.c.tab!, header + before, after, extra, nIndent, ac.signal);
       text = trimOverlap(text, after);
       const lines = text.split('\n');
       if (lines.length > 15) text = lines.slice(0, 15).join('\n');
-      if (!text.trim()) return;
+      if (!text.trim() || !syntaxPlausible(text, doc.languageId)) return;
       return [new vscode.InlineCompletionItem(text, new vscode.Range(pos, pos))];
     } finally {
       this.act.end(job);
@@ -995,6 +1057,7 @@ class Updater {
 
 export function activate(ctx: vscode.ExtensionContext): void {
   out = vscode.window.createOutputChannel('Octomilka');
+  process.env[OFFLINE_ENV] = cfg().get('offline', false) ? '1' : '';
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   status.command = 'octomilka.showPanel';
   const c = new Controller(ctx, status);
@@ -1102,9 +1165,11 @@ export function activate(ctx: vscode.ExtensionContext): void {
       void vscode.commands.executeCommand(run[pick.id]);
     }),
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('octomilka.profile') || e.affectsConfiguration('octomilka.gpu')) {
+      if (e.affectsConfiguration('octomilka.offline'))
+        process.env[OFFLINE_ENV] = cfg().get('offline', false) ? '1' : '';
+      if (e.affectsConfiguration('octomilka.profile') || e.affectsConfiguration('octomilka.gpu'))
         void ctx.globalState.update('forceCpu', undefined).then(() => c.init(true));
-      } else if (e.affectsConfiguration('octomilka')) c.render();
+      else if (e.affectsConfiguration('octomilka')) c.render();
     }),
   );
 

@@ -9,6 +9,9 @@ import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 
 export const LLAMA_TAG = 'b12125';
+
+/** Env proměnná, kterou activate() nastaví podle nastavení octomilka.offline. */
+export const OFFLINE_ENV = 'OCTOMILKA_OFFLINE';
 const GH = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/`;
 const HF = 'https://huggingface.co/';
 
@@ -91,6 +94,8 @@ export async function download(
   onBytes: (n: number) => void,
   signal: AbortSignal,
 ): Promise<void> {
+  if (process.env[OFFLINE_ENV])
+    throw new Error(`Offline režim – chybí ${path.basename(dest)}. Vypni octomilka.offline a stáhni to předem.`);
   await fsp.mkdir(path.dirname(dest), { recursive: true });
   const part = dest + '.part';
   let start = 0;

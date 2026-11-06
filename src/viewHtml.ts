@@ -30,10 +30,10 @@ export function viewHtml(csp: string, mac: boolean): string {
   html, body { height: 100%; }
   body {
     margin: 0; display: flex; flex-direction: column;
-    font: 13px/1.45 var(--vscode-font-family); color: var(--fg); background: var(--bg);
+    font: 12px/1.4 var(--vscode-font-family); color: var(--fg); background: var(--bg);
   }
   button {
-    font: inherit; font-size: 12px; cursor: pointer; border-radius: 4px; padding: 4px 10px;
+    font: inherit; font-size: 11px; cursor: pointer; border-radius: 3px; padding: 3px 8px;
     border: 1px solid var(--vscode-button-border, transparent);
     background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground);
   }
@@ -52,8 +52,8 @@ export function viewHtml(csp: string, mac: boolean): string {
 
   /* ---- stavový řádek ---- */
   #status {
-    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-    padding: 7px 12px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 5px 10px; border-bottom: 1px solid var(--line);
   }
   .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--muted); }
   .dot.ok { background: var(--ok); }
@@ -81,7 +81,7 @@ export function viewHtml(csp: string, mac: boolean): string {
     flex: 1 1 auto; min-height: 0; display: grid;
     grid-template-columns: minmax(250px, 1fr) minmax(280px, 1.35fr) 300px;
   }
-  #main > section { min-height: 0; overflow: auto; padding: 10px 12px; }
+  #main > section { min-height: 0; overflow: auto; padding: 7px 10px; }
   #main > section + section { border-left: 1px solid var(--line); }
   /* užší panel: celý obsah se roluje najednou, sekce mají přirozenou výšku */
   @media (max-width: 980px) {
@@ -125,10 +125,10 @@ export function viewHtml(csp: string, mac: boolean): string {
   .chip button:hover { color: var(--fg); background: none; }
 
   /* seznam řešení */
-  .list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+  .list { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
   .item {
-    display: grid; grid-template-columns: 22px 1fr auto; align-items: center; gap: 8px;
-    width: 100%; text-align: left; padding: 6px 8px; border-radius: 5px;
+    display: grid; grid-template-columns: 20px 1fr auto; align-items: center; gap: 6px;
+    width: 100%; text-align: left; padding: 4px 6px; border-radius: 4px;
     background: transparent; border: 1px solid transparent; color: var(--fg);
   }
   .item:hover { background: var(--vscode-list-hoverBackground); }

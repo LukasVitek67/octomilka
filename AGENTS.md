@@ -63,7 +63,7 @@ Engine + models live in context.globalStorageUri (Windows: %APPDATA%\Code\User\g
 
 | File | Role |
 |---|---|
-| `src/extension.ts` | Wiring. `Controller` (setup/download/start servers, status bar, GPU→CPU fallback, idle unload), `generateFor()` (shared big-model generation incl. confidence), `Completer` (inline suggestions, `force()` for "Doplň teď!", `bigFree()` fallback, `smart()` for stub/instruction), `generateCommand` (Ctrl+Alt+Enter streams into the document), `Solutions` (alternatives, two-step ideas→code, apply), `Updater`, `activate()` (commands, menu, first-run panel reveal). |
+| `src/extension.ts` | Wiring. `Controller` (setup/download/start servers, status bar, GPU→CPU fallback, idle unload), `generateFor()` (shared big-model generation incl. confidence), `Completer` (inline suggestions, `force()` for "Doplň teď!", `bigFree()` fallback, `smart()` for stub/instruction), `workspaceContext()` (async file index with 30 s TTL — workspace files of same extension for FIM context), `syntaxPlausible()` (CSS/JS cross-language guard), `generateCommand` (Ctrl+Alt+Enter streams into the document), `Solutions` (alternatives, two-step ideas→code, apply), `Updater`, `activate()` (commands, menu, first-run panel reveal). |
 | `src/engine.ts` | No vscode import. `LLAMA_TAG` (pinned llama.cpp build), model list `M` + `PROFILES` (small/medium/large by RAM), `engineAsset()` per OS/arch, `download()` (resume, `.part`), `extract()` (Windows uses **System32\tar.exe**, not Git's tar), `LlamaServer` (spawn, health wait, `-ngl auto`→CPU retry, `phase`, `device`), `infill()`, `chatStream()` (SSE + optional logprobs callback), prompts: `buildMessages()`, `buildIdeasMessages()`, `parseIdeas()`, `langName()`. |
 | `src/stub.ts` | No vscode import, unit-tested. Detects an **empty function at the cursor** (`detectStub`: `{|}`, `{|\n}`, empty line in body, Python `def …:`), **comment instructions** (`detectInstruction`, comment syntax per language via `commentText`/`lineComment`), function ranges (`matchBrace`, `functionAt`, `enclosingFunction`), and `BodyStreamer`, which cleans streamed model output: strips ``` fences, the `APPROACH:` title line, an echoed signature/comment, a repeated line prefix and the closing brace (by brace balance), stops on dedent and re-bases indentation. |
 | `src/spots.ts` | A "spot" = a place in code with solutions: `fn` (key = uri + normalized signature) or `instr` (key = uri + last comment line). `SpotStore` persists in `workspaceState` key `octomilka.spots.v1` (max 300 spots × 12 variants). `rankVariants()` sorts by confidence (user code last), `markBest()` sets ⭐ = highest confidence, `matchesFilter()` is the must/must-not finder. `resolveAt()` finds the spot at the cursor, `locate()` finds it again later by anchor text. `Located.replacement()` produces text for the replaced range. |
@@ -86,7 +86,9 @@ Engine + models live in context.globalStorageUri (Windows: %APPDATA%\Code\User\g
   Ctrl+→ (accept word), Alt+] / Alt+[ (cycle inline items).
   ⚠ **Avoid Ctrl+Alt+<letter> bindings**: on Czech keyboards Ctrl+Alt = AltGr, which types characters (`[ ] { } \ | @ # & € $ < >`).
 - Settings: `octomilka.enabled` (true), `profile` (auto|small|medium|large), `gpu` (true), `autoFunction` (true),
-  `debounceMs` (200), `idleMinutes` (15, big model unload), `autoUpdate` (auto|notify|off).
+  `debounceMs` (200), `idleMinutes` (15, big model unload), `autoUpdate` (auto|notify|off), `offline` (false).
+  `offline=true` blocks all network traffic (missing engine/model → error). Set env `OCTOMILKA_OFFLINE` before launch
+  to enforce it at process level (useful in air-gapped CIs).
 
 ## 4. How the AI features work (and why)
 
@@ -102,8 +104,15 @@ URLs are pinned Hugging Face `resolve/main` links with byte sizes. Engine = llam
 Windows x64 uses the **Vulkan** build. Its CPU backends are loaded dynamically, so it also runs without a GPU.
 
 - **Tab suggestions:** `/infill` on the tab server with `input_prefix/suffix`, `input_extra` (snippets of other visible
-  editors), `n_indent`, `t_max_predict_ms`. The prefix starts with a **file header comment**
-  (`// prime.ts (TypeScript)`). Without it, the tiny model guessed the wrong language (it suggested C# in a `.ts` file).
+  editors **plus workspace files of the same extension** via `workspaceContext()`), `n_indent`, `t_max_predict_ms`.
+  The prefix starts with a **file header comment** (`// prime.ts (TypeScript)`). Without it, the tiny model guessed the
+  wrong language (it suggested C# in a `.ts` file).
+  `workspaceContext()`: caches `findFiles(**/*<ext>)` per workspace root + extension with a 30 s TTL and 500 ms race
+  timeout. Prioritises files in the same directory. Max 6 chunks × 5 kB, skips files > 50 kB, skips already-open editors.
+- **CSS accuracy guard:** `detectStub` mistook empty CSS selector bodies `selector {}` for empty function stubs and
+  triggered the instruct (JS-focused) model, which returned JavaScript. Fix: `CSS_LANGS` set (`css/scss/less/stylus/sass`)
+  — `smart()` is never called for these languages. Additionally `syntaxPlausible()` rejects tab suggestions whose text
+  contains JS keywords (`function(`, `const `, `=>`, `import {`, etc.) when the file is CSS.
 - **Whole function from a signature / code from a comment** (`Completer.smart`): when `detectStub` or
   `detectInstruction` matches, the big model writes the body via chat with a `<FILL_HERE>` marker. The result is stored
   as a variant and shown as multi-line ghost text. Stored variants are returned instantly next time (all of them, best
@@ -194,7 +203,7 @@ code --install-extension octomilka-<version>.vsix --force
    need one manual `.vsix` install.
 
 History: 0.1.0 base (Tab + whole function), 0.2.0 language fix + comment instructions + alternatives + memory,
-0.3.0 auto-updater, 0.4.0 bottom panel + live status + confidence ranking + finder, 0.5.0 "Doplň teď!" (Alt+Enter).
+0.3.0 auto-updater, 0.4.0 bottom panel + live status + confidence ranking + finder, 0.5.0 "Doplň teď!" (Alt+Enter), 0.6.0 offline mode, stealth, neutral file names.
 
 ## 8. Conventions
 

@@ -31,7 +31,7 @@ Otevře se kliknutím na Octomilku ve stavové liště, nebo sám při prvním s
 
 1. Stáhni `octomilka-x.y.z.vsix` z [Releases](https://github.com/LukasVitek67/octomilka/releases/latest).
 2. Ve VS Code otevři Extensions (Ctrl+Shift+X), klikni na `…` vpravo nahoře a vyber **Install from VSIX…**.
-   Nebo v terminálu: `code --install-extension octomilka-0.5.0.vsix`
+   Nebo v terminálu: `code --install-extension octomilka-0.6.0.vsix`
 3. Vpravo dole vyskočí „Stáhnout“. Jednorázově se stáhne engine a modely podle toho, kolik máš RAM.
 4. Hotovo. Ve stavové liště vpravo dole uvidíš ✨ Octomilka.
 
@@ -71,6 +71,8 @@ VS Code ── Octomilka (tahle extension) ──> llama-server na 127.0.0.1 ─
 - Modely: GGUF z Hugging Face. Ukládají se do složky extension (`globalStorage/lukas-vitek.octomilka`).
 - Server poslouchá jen na `127.0.0.1` (nikdo zvenku se k němu nepřipojí). Kód nikam neodchází.
   Síť se použije jen jednou při stažení enginu a modelů.
+
+Nastavení `octomilka.offline` zakáže veškerý síťový provoz (chybějící soubory ohlásí chybou).
 
 ## Úpravy a vývoj
 
