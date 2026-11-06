@@ -3,6 +3,7 @@ import * as fsp from 'fs/promises';
 import * as path from 'path';
 import {
   LLAMA_TAG,
+  NEUTRAL_BIN,
   OFFLINE_ENV,
   PROFILES,
   Profile,
@@ -144,11 +145,10 @@ class Controller {
     const asset = engineAsset(variant);
     if (!asset) throw new Error(`Nepodporovaná platforma: ${process.platform}-${process.arch}`);
     const engineDir = path.join(this.dir, 'engine', `${LLAMA_TAG}-${variant}`);
-    const binName = process.platform === 'win32' ? 'llama-server.exe' : 'llama-server';
-    const bin = await findFile(engineDir, binName);
-    const tabPath = path.join(this.dir, 'models', prof.tab.file);
-    const genPath = path.join(this.dir, 'models', prof.gen.file);
-    return { prof, variant, asset, engineDir, binName, bin, tabPath, genPath };
+        const bin = await findFile(engineDir, NEUTRAL_BIN);
+    const tabPath = path.join(this.dir, 'models', 'tab.bin');
+    const genPath = path.join(this.dir, 'models', 'gen.bin');
+    return { prof, variant, asset, engineDir, bin, tabPath, genPath };
   }
 
   private async doInit(interactive: boolean): Promise<void> {
@@ -186,6 +186,9 @@ class Controller {
           const archive = todo.find((t) => t.archive)!.dest;
           await extract(archive, p.engineDir);
           await fsp.rm(archive, { force: true });
+          // přejmenovat llama-server na neutrální název
+          const rawBin = await findFile(p.engineDir, process.platform === 'win32' ? 'llama-server.exe' : 'llama-server');
+          if (rawBin) await fsp.rename(rawBin, path.join(path.dirname(rawBin), NEUTRAL_BIN));
           p = await this.paths();
           if (!p.bin) throw new Error('V balíčku enginu chybí llama-server');
         }

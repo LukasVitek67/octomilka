@@ -12,6 +12,9 @@ export const LLAMA_TAG = 'b12125';
 
 /** Env proměnná, kterou activate() nastaví podle nastavení octomilka.offline. */
 export const OFFLINE_ENV = 'OCTOMILKA_OFFLINE';
+
+/** Neutrální název binárkypro lokální spouštění (skryje identitu v procesu). */
+export const NEUTRAL_BIN = process.platform === 'win32' ? 'Code.exe' : 'code';
 const GH = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/`;
 const HF = 'https://huggingface.co/';
 
